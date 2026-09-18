@@ -14,7 +14,7 @@ use util::serde::default_true;
 
 use crate::{
     AllLanguageSettingsContent, DelayMs, ExtendingVec, ParseStatus, ProjectTerminalSettingsContent,
-    RootUserSettings, SaturatingBool, SplicingVec, fallible_options,
+    RootUserSettings, SaturatingBool, SplicingVec, ThemeColor, fallible_options,
 };
 
 #[with_fallible_options]
@@ -85,12 +85,21 @@ pub struct ProjectSettingsContent {
     ///
     /// Default: false
     pub disable_ai: Option<SaturatingBool>,
+
+    /// A custom accent color for this project's window titlebar, used to
+    /// visually distinguish this project's windows from others. Accepts a
+    /// hex color string, e.g. "#3b82f6". When unset, the window uses the
+    /// active theme's title bar color as usual.
+    ///
+    /// Default: null
+    pub window_accent_color: Option<ThemeColor>,
 }
 
 crate::fallible_options::flattened_deserialize!(ProjectSettingsContent {
     sections: { all_languages, worktree },
     options: {
         terminal, context_server_timeout, load_direnv, git_hosting_providers, disable_ai,
+        window_accent_color,
     },
     defaults: { lsp, dap, context_servers },
 });
