@@ -20992,7 +20992,7 @@ mod window_accent_color_settings_tests {
                     worktree_id,
                     LocalSettingsPath::InWorktree(project_path.clone()),
                     LocalSettingsKind::Settings,
-                    Some(r#"{ "window_accent_color": "#3b82f6" }"#),
+                    Some(r##"{ "window_accent_color": "#3b82f6" }"##),
                     cx,
                 )
                 .unwrap();
@@ -21038,7 +21038,7 @@ mod window_accent_color_settings_tests {
             path!("/dir"),
             json!({
                 ".zed": {
-                    "settings.json": r#"{ "window_accent_color": "#3b82f6" }"#
+                    "settings.json": r##"{ "window_accent_color": "#3b82f6" }"##
                 },
                 "a.rs": "fn a() {}",
             }),
