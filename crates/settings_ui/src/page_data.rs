@@ -8632,6 +8632,20 @@ fn ai_page(cx: &App) -> SettingsPage {
                 files: USER | PROJECT,
             }),
             SettingsPageItem::SettingItem(SettingItem {
+                title: "Window Accent Color",
+                description: "A custom accent color for this project's window titlebar, used to visually distinguish this project's windows from others.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("window_accent_color"),
+                    pick: |settings_content| settings_content.project.window_accent_color.as_ref(),
+                    write: |settings_content, value, _| {
+                        settings_content.project.window_accent_color = value;
+                    },
+                }),
+                metadata: None,
+                files: PROJECT,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
                 title: "Threads Sidebar Position",
                 description: "Which side of the window the Threads Sidebar appears on.",
                 field: Box::new(SettingField {
