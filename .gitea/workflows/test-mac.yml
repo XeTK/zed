@@ -1,0 +1,60 @@
+# Minimal macOS build+test CI for this fork's Gitea mirror.
+#
+# Adapted from the run_tests_mac job in .github/workflows/run_tests.yml,
+# dropping the change-detection orchestration, clippy/style jobs, and
+# sccache/R2 remote caching (no secrets for that on this instance). Follows
+# the ../../mixxx fork's convention of using tag-pinned actions and
+# `runs-on: macos` (the registered label for this instance's persistent
+# native macOS runner - see ~/Documents/code/gitea-runner-manager/README.md),
+# rather than the upstream GitHub workflow's SHA-pinned actions and
+# Namespace-specific runner/cache actions, neither of which exist here.
+name: test-mac
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+concurrency:
+  group: test-mac-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  test:
+    runs-on: macos
+    timeout-minutes: 60
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          clean: false
+
+      - name: Set up cargo CI config
+        run: |
+          mkdir -p ./../.cargo
+          cp ./.cargo/ci-config.toml ./../.cargo/config.toml
+
+      - name: Clear target dir if it has grown too large
+        # This runner is persistent (not ephemeral), so a stale target/ can
+        # accumulate across runs indefinitely without this.
+        run: ./script/clear-target-dir-if-larger-than 350 200
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: Download wasi-sdk
+        run: ./script/download-wasi-sdk
+
+      - name: cargo nextest run
+        run: cargo nextest run --workspace --no-fail-fast --no-tests=warn
+
+      - name: Clean up cargo CI config
+        if: always()
+        run: rm -rf ./../.cargo
