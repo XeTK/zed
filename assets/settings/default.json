@@ -1693,6 +1693,13 @@
   //
   // Default: false
   "disable_ai": false,
+  // A custom accent color for this project's window titlebar, used to
+  // visually distinguish this project's windows from others. Accepts a
+  // hex color string, e.g. "#3b82f6". When unset, the window uses the
+  // active theme's title bar color as usual.
+  //
+  // Default: null
+  "window_accent_color": null,
   // Automatically update Zed. This setting may be ignored on Linux if
   // installed through a package manager.
   "auto_update": true,
