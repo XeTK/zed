@@ -7,7 +7,7 @@ use gpui::{
     WindowButtonLayout, WindowControlArea, div, px,
 };
 use project::DisableAiSettings;
-use settings::Settings;
+use settings::{Settings, SettingsStore};
 use smallvec::SmallVec;
 use std::mem;
 use ui::{
@@ -40,6 +40,11 @@ impl PlatformTitleBar {
         let platform_style = PlatformStyle::platform();
         let system_window_tabs = cx.new(|_cx| SystemWindowTabs::new());
 
+        // The window accent color is entity-local (unlike the theme, which is
+        // global), so a plain re-render on settings change is enough to pick
+        // up changes to it - `title_bar_color` recomputes fresh each render.
+        cx.observe_global::<SettingsStore>(|_, cx| cx.notify()).detach();
+
         Self {
             id: id.into(),
             platform_style,
@@ -61,6 +66,14 @@ impl PlatformTitleBar {
     }
 
     pub fn title_bar_color(&self, window: &mut Window, cx: &mut Context<Self>) -> Hsla {
+        if let Some(accent) = self.workspace_window_accent_color(cx) {
+            return if window.is_window_active() || self.should_move {
+                accent
+            } else {
+                accent.opacity(0.6)
+            };
+        }
+
         if cfg!(any(target_os = "linux", target_os = "freebsd")) {
             if window.is_window_active() && !self.should_move {
                 cx.theme().colors().title_bar_background
@@ -70,6 +83,18 @@ impl PlatformTitleBar {
         } else {
             cx.theme().colors().title_bar_background
         }
+    }
+
+    /// Returns the active workspace's project-configured window accent
+    /// color, if one is set via `window_accent_color` in `.zed/settings.json`.
+    fn workspace_window_accent_color(&self, cx: &App) -> Option<Hsla> {
+        self.multi_workspace
+            .as_ref()?
+            .upgrade()?
+            .read(cx)
+            .workspace()
+            .read(cx)
+            .window_accent_color(cx)
     }
 
     pub fn set_children<T>(&mut self, children: T)
