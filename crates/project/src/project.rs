@@ -1178,6 +1178,28 @@ impl DisableAiSettings {
     }
 }
 
+/// A custom accent color for a project's window titlebar, configurable via
+/// `.zed/settings.json`, used to visually distinguish that project's windows
+/// from others.
+///
+/// Default: unset (falls back to the active theme's title bar color)
+#[derive(Clone, Debug, RegisterSetting)]
+pub struct WindowAccentColorSettings {
+    pub window_accent_color: Option<gpui::Rgba>,
+}
+
+impl settings::Settings for WindowAccentColorSettings {
+    fn from_settings(content: &settings::SettingsContent) -> Self {
+        Self {
+            window_accent_color: content
+                .project
+                .window_accent_color
+                .as_ref()
+                .and_then(|color| gpui::Rgba::try_from(color).ok()),
+        }
+    }
+}
+
 impl Project {
     pub fn init(client: &Arc<Client>, cx: &mut App) {
         connection_manager::init(client.clone(), cx);
@@ -2441,6 +2463,28 @@ impl Project {
         cx: &'a App,
     ) -> impl 'a + DoubleEndedIterator<Item = Entity<Worktree>> {
         self.worktree_store.read(cx).visible_worktrees(cx)
+    }
+
+    /// Returns the `SettingsLocation` used to resolve settings that apply to
+    /// the project as a whole (e.g. window-level settings), rather than to a
+    /// specific file. This is the first visible worktree, preferring a real
+    /// directory worktree over a single-file one - the same tie-break
+    /// `default_visible_worktree_paths` already uses. For multi-root
+    /// workspaces, only this worktree's `.zed/settings.json` is consulted.
+    pub fn primary_settings_location(&self, cx: &App) -> Option<SettingsLocation<'static>> {
+        let worktree = self
+            .visible_worktrees(cx)
+            .sorted_by(|left, right| {
+                left.read(cx)
+                    .is_single_file()
+                    .cmp(&right.read(cx).is_single_file())
+            })
+            .next()?;
+        let worktree_id = worktree.read(cx).id();
+        Some(SettingsLocation {
+            worktree_id,
+            path: RelPath::empty(),
+        })
     }
 
     pub(crate) fn default_visible_worktree_paths(

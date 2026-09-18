@@ -99,7 +99,7 @@ use persistence::{SerializedWindowBounds, model::SerializedWorkspace};
 use postage::stream::Stream;
 use project::{
     DirectoryLister, Project, ProjectEntryId, ProjectPath, ResolvedPath, Worktree, WorktreeId,
-    WorktreeSettings,
+    WindowAccentColorSettings, WorktreeSettings,
     debugger::{breakpoint_store::BreakpointStoreEvent, session::ThreadStatus},
     git_store::{GitStoreEvent, RepositoryEvent},
     project_settings::ProjectSettings,
@@ -2933,6 +2933,15 @@ impl Workspace {
 
     pub fn path_style(&self, cx: &App) -> PathStyle {
         self.project.read(cx).path_style(cx)
+    }
+
+    /// Returns this workspace's project-configured window accent color, if
+    /// one is set via `window_accent_color` in `.zed/settings.json`.
+    pub fn window_accent_color(&self, cx: &App) -> Option<Hsla> {
+        let location = self.project.read(cx).primary_settings_location(cx)?;
+        WindowAccentColorSettings::get(Some(location), cx)
+            .window_accent_color
+            .map(Into::into)
     }
 
     pub fn recently_activated_items(&self, cx: &App) -> HashMap<EntityId, usize> {
