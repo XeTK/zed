@@ -150,6 +150,12 @@ impl Deref for ThemeColor {
     }
 }
 
+impl AsRef<str> for ThemeColor {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
 impl From<ThemeColor> for String {
     fn from(value: ThemeColor) -> Self {
         value.0

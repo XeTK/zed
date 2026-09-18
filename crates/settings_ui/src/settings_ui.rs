@@ -550,6 +550,7 @@ fn init_renderers(cx: &mut App) {
         )
         .add_basic_renderer::<bool>(render_toggle_button)
         .add_basic_renderer::<String>(render_text_field)
+        .add_basic_renderer::<settings::ThemeColor>(render_color_field)
         .add_basic_renderer::<SharedString>(render_text_field)
         .add_basic_renderer::<settings::SaturatingBool>(render_toggle_button)
         .add_basic_renderer::<settings::CursorShape>(render_dropdown)
@@ -4971,6 +4972,39 @@ fn render_text_field<T: From<String> + Into<String> + AsRef<str> + Clone>(
                 .log_err(); // todo(settings_ui) don't log err
             }
         })
+        .into_any_element()
+}
+
+/// Renders a hex-color text field with a color swatch preview, reusing
+/// `render_text_field`'s validation/persistence for the text input itself -
+/// there's no dedicated color-picker widget in this codebase yet, so this
+/// keeps the swatch minimal rather than building a full picker.
+fn render_color_field(
+    field: SettingField<settings::ThemeColor>,
+    file: SettingsUiFile,
+    metadata: Option<&SettingsFieldMetadata>,
+    title: &'static str,
+    description: &'static str,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let (_, current_value) =
+        SettingsStore::global(cx).get_value_from_file(file.to_settings(), field.pick);
+    let swatch_color = current_value.and_then(|color| gpui::Rgba::try_from(color).ok());
+
+    h_flex()
+        .gap_2()
+        .items_center()
+        .child(
+            div()
+                .flex_shrink_0()
+                .size(px(20.))
+                .rounded_sm()
+                .border_1()
+                .border_color(cx.theme().colors().border)
+                .when_some(swatch_color, |this, color| this.bg(color)),
+        )
+        .child(render_text_field(field, file, metadata, title, description, window, cx))
         .into_any_element()
 }
 

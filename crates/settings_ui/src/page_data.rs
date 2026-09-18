@@ -8641,7 +8641,7 @@ fn collaboration_page() -> SettingsPage {
 }
 
 fn ai_page(cx: &App) -> SettingsPage {
-    fn general_section() -> [SettingsPageItem; 6] {
+    fn general_section() -> [SettingsPageItem; 7] {
         [
             SettingsPageItem::SectionHeader("General"),
             SettingsPageItem::SettingItem(SettingItem {
@@ -8657,6 +8657,20 @@ fn ai_page(cx: &App) -> SettingsPage {
                 }),
                 metadata: None,
                 files: USER | PROJECT,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Window Accent Color",
+                description: "A custom accent color for this project's window titlebar, used to visually distinguish this project's windows from others.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("window_accent_color"),
+                    pick: |settings_content| settings_content.project.window_accent_color.as_ref(),
+                    write: |settings_content, value, _| {
+                        settings_content.project.window_accent_color = value;
+                    },
+                }),
+                metadata: None,
+                files: PROJECT,
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Threads Sidebar Side",
