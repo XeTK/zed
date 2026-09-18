@@ -5493,6 +5493,22 @@ Run the {#action theme_selector::Toggle} action in the command palette to see a 
 - `open_menus_on_hover`: Whether to open title-bar menus on hover. Once a menu is open, hovering always switches between menus.
 - `button_layout`: The layout of window control buttons in the title bar (Linux only). Can be set to `"platform_default"` to follow the system setting, `"standard"` to use Zed's built-in layout, or a custom format like `"close:minimize,maximize"`
 
+## Window Accent Color
+
+- Description: A custom accent color for this project's window titlebar, used to visually distinguish this project's windows from others. This is a project setting, configured per-project via `.zed/settings.json`.
+- Setting: `window_accent_color`
+- Default: `null`
+
+**Options**
+
+A hex color string, e.g. `"#3b82f6"`. When unset, the window uses the active theme's title bar color.
+
+```json [settings]
+{
+  "window_accent_color": "#3b82f6"
+}
+```
+
 ## Window Title Format
 
 - Description: Template for the window title. Use `${separator}` to insert a
