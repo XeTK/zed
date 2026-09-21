@@ -2341,16 +2341,35 @@ impl Sidebar {
         let opaque_window =
             cx.theme().window_background_appearance() == WindowBackgroundAppearance::Opaque;
 
+        // Projects with a `window_accent_color` show their name on that color,
+        // matching their window's titlebar. The colors are chosen to sit behind
+        // text (they can be dark), so the name is drawn on a pill rather than
+        // recolored, and it keeps the default text color for contrast.
+        let accent_color = self.multi_workspace.upgrade().and_then(|multi_workspace| {
+            multi_workspace.read(cx).project_group_accent_color(key, cx)
+        });
+        let muted = !is_active && accent_color.is_none();
+
         let label = if highlight_positions.is_empty() {
             Label::new(label.clone())
-                .when(!is_active, |this| this.color(Color::Muted))
+                .when(muted, |this| this.color(Color::Muted))
                 .when(!opaque_window, |this| this.truncate())
                 .into_any_element()
         } else {
             HighlightedLabel::new(label.clone(), highlight_positions.to_vec())
-                .when(!is_active, |this| this.color(Color::Muted))
+                .when(muted, |this| this.color(Color::Muted))
                 .when(!opaque_window, |this| this.truncate())
                 .into_any_element()
+        };
+        let label = match accent_color {
+            Some(accent_color) => div()
+                .min_w_0()
+                .px_1()
+                .rounded_sm()
+                .bg(accent_color)
+                .child(label)
+                .into_any_element(),
+            None => label,
         };
 
         let color = cx.theme().colors();
