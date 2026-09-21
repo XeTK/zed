@@ -34,6 +34,23 @@ jobs:
         with:
           clean: false
 
+      - name: Use the pinned Rust toolchain via rustup
+        # The runner's default cargo is Homebrew's (currently 1.95.0, no rustup),
+        # not the version pinned in rust-toolchain.toml, and it can't install the
+        # wasm32-wasip2 target the extension tests need. rustup honours
+        # rust-toolchain.toml (toolchain + targets) and keeps them in ~/.rustup,
+        # so this is only slow the first time.
+        run: |
+          if ! command -v rustup >/dev/null 2>&1 && [ ! -x "${HOME}/.cargo/bin/rustup" ]; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --profile minimal --default-toolchain none
+          fi
+          echo "${HOME}/.cargo/bin" >> "$GITHUB_PATH"
+          export PATH="${HOME}/.cargo/bin:${PATH}"
+          rustup toolchain install
+          rustup show
+          cargo --version
+
       - name: Set up cargo CI config
         run: |
           mkdir -p ./../.cargo
@@ -53,7 +70,30 @@ jobs:
         run: ./script/download-wasi-sdk
 
       - name: cargo nextest run
-        run: cargo nextest run --workspace --no-fail-fast --no-tests=warn
+        # Services started by launchd get a low open-file limit (256 by default),
+        # and the parallel tests hit "Too many open files" when starting a Tokio
+        # runtime (collab editorconfig test).
+        #
+        # --retries 2 covers timing-based tests that fail intermittently under
+        # parallel load (e.g. gpui's foreground_work_excludes_setup_before_trace_
+        # scope_starts leaked 46ms of setup work into its measured summary in one
+        # of the three runs checked). nextest reports retried tests as FLAKY
+        # instead of hiding them.
+        #
+        # SHELL is pinned because terminal tests start $SHELL interactively and
+        # wait for it to exit on EOF. test_terminal_eof timed out on this runner
+        # after 15s on every run (9568/9569 otherwise pass); the suspected cause
+        # is the login shell's startup (zsh's compinit prompts on insecure
+        # directories), which is unconfirmed - this is the experiment.
+        env:
+          SHELL: /bin/bash
+        run: |
+          current="$(ulimit -n)"
+          if [ "$current" != "unlimited" ] && [ "$current" -lt 10240 ]; then
+            ulimit -Sn 10240
+          fi
+          echo "open file limit: $(ulimit -n)"
+          cargo nextest run --workspace --no-fail-fast --no-tests=warn --retries 2
 
       - name: Clean up cargo CI config
         if: always()
