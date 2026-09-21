@@ -3,8 +3,8 @@ use fs::Fs;
 
 use gpui::{
     AnyView, App, Context, DragMoveEvent, Entity, EntityId, EventEmitter, FocusHandle, Focusable,
-    ManagedView, MouseButton, Pixels, Render, Subscription, Task, TaskExt, WeakEntity, Window,
-    WindowId, actions, deferred, px,
+    Hsla, ManagedView, MouseButton, Pixels, Render, Subscription, Task, TaskExt, WeakEntity,
+    Window, WindowId, actions, deferred, px,
 };
 pub use project::ProjectGroupKey;
 use project::{DisableAiSettings, Project};
@@ -940,6 +940,16 @@ impl MultiWorkspace {
             .map(|held| held.workspace.clone())
             .filter(|workspace| workspace.read(cx).project_group_key(cx) == *key)
             .collect()
+    }
+
+    /// The window accent color configured for a project group, if any.
+    ///
+    /// This comes from the group's loaded workspaces, so a group that has not
+    /// been opened yet in this session has no color until it is.
+    pub fn project_group_accent_color(&self, key: &ProjectGroupKey, cx: &App) -> Option<Hsla> {
+        self.workspaces_for_project_group(key, cx)
+            .iter()
+            .find_map(|workspace| workspace.read(cx).window_accent_color(cx))
     }
 
     pub fn remove_project_group(
