@@ -127,6 +127,14 @@ pub fn fuzzy_match_positions(query: &str, candidate: &str) -> Option<Vec<usize>>
     None
 }
 
+/// Byte positions of `query` within the title shown for `session`, or `None`
+/// if the title doesn't match. This must match against `display_title()` (which
+/// prefers a user rename), because the positions are used to highlight that
+/// same string.
+fn title_match_positions(query: &str, session: &ThreadMetadata) -> Option<Vec<usize>> {
+    fuzzy_match_positions(query, session.display_title().as_ref())
+}
+
 pub enum ThreadsArchiveViewEvent {
     Close,
     Activate { thread: ThreadMetadata },
@@ -299,12 +307,7 @@ impl ThreadsArchiveView {
 
         for session in sessions {
             let highlight_positions = if !query.is_empty() {
-                let title = session
-                    .title
-                    .as_ref()
-                    .map(|t| t.as_ref())
-                    .unwrap_or(DEFAULT_THREAD_TITLE);
-                if let Some(positions) = fuzzy_match_positions(&query, title) {
+                if let Some(positions) = title_match_positions(&query, &session) {
                     positions
                 } else {
                     // If title didn't match, also try matching the project name
@@ -1687,5 +1690,54 @@ mod tests {
                 "position {pos} is not a valid UTF-8 boundary in {text:?}"
             );
         }
+    }
+
+    fn thread_with_titles(title: &str, title_override: Option<&str>) -> ThreadMetadata {
+        ThreadMetadata {
+            thread_id: ThreadId::new(),
+            archived: true,
+            session_id: Some(acp::SessionId::new("session")),
+            agent_id: agent::ZED_AGENT_ID.clone(),
+            title: Some(SharedString::from(title.to_string())),
+            title_override: title_override.map(|title| SharedString::from(title.to_string())),
+            updated_at: Utc::now(),
+            created_at: None,
+            interacted_at: None,
+            worktree_paths: project::WorktreePaths::from_folder_paths(&Default::default()),
+            remote_connection: None,
+        }
+    }
+
+    #[test]
+    fn test_title_match_positions_index_into_renamed_title() {
+        // The list draws `display_title()`, which prefers a user rename, so
+        // highlight positions must index into that string. "🔥🔥 bar" has char
+        // boundaries at 0, 4, 8, 9, 10, 11, 12.
+        let thread = thread_with_titles("foo ren", Some("🔥🔥 bar"));
+        let shown = thread.display_title();
+
+        let positions = title_match_positions("bar", &thread).expect("renamed title matches");
+        assert_eq!(positions, vec![9, 10, 11]);
+        for &pos in &positions {
+            assert!(
+                shown.is_char_boundary(pos),
+                "position {pos} is not a valid UTF-8 boundary in {shown:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_title_match_positions_ignore_replaced_title() {
+        // "ren" only appears in the original title, which the rename replaced,
+        // so the thread shouldn't match (and must not yield positions computed
+        // against the string that isn't drawn).
+        let thread = thread_with_titles("foo ren", Some("🔥🔥 bar"));
+        assert_eq!(title_match_positions("ren", &thread), None);
+    }
+
+    #[test]
+    fn test_title_match_positions_without_rename_use_title() {
+        let thread = thread_with_titles("foo ren", None);
+        assert_eq!(title_match_positions("ren", &thread), Some(vec![4, 5, 6]));
     }
 }
