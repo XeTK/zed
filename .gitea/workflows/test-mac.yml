@@ -74,11 +74,11 @@ jobs:
         # and the parallel tests hit "Too many open files" when starting a Tokio
         # runtime (collab editorconfig test).
         #
-        # --retries 2 covers timing-based tests that fail intermittently under
-        # parallel load (e.g. gpui's foreground_work_excludes_setup_before_trace_
-        # scope_starts leaked 46ms of setup work into its measured summary in one
-        # of the three runs checked). nextest reports retried tests as FLAKY
-        # instead of hiding them.
+        # --retries 2 covers tests that fail intermittently; nextest reports
+        # retried tests as FLAKY instead of hiding them. It does not help
+        # load-sensitive timing tests, since the retries run in the same busy
+        # moment: gpui's foreground_work_excludes_setup_before_trace_scope_starts
+        # failed all three attempts, so it runs alone via .config/nextest.toml.
         #
         # SHELL is pinned because terminal tests start $SHELL interactively and
         # wait for it to exit on EOF. test_terminal_eof timed out on this runner
