@@ -73,7 +73,8 @@ use util::{
     time::duration_alt_display,
 };
 use workspace::{
-    CollaboratorId, MultiWorkspace, NewTerminal, PathList, Workspace, path_link::sanitize_path_text,
+    CollaboratorId, Item, MultiWorkspace, NewTerminal, PathList, Workspace,
+    path_link::sanitize_path_text,
 };
 use zed_actions::agent::{Chat, ToggleModelSelector};
 
@@ -3479,6 +3480,14 @@ impl Render for ConversationView {
     }
 }
 
+impl Item for ConversationView {
+    type Event = AcpServerViewEvent;
+
+    fn tab_content_text(&self, _detail: usize, cx: &App) -> SharedString {
+        self.title(cx)
+    }
+}
+
 fn render_agent_markdown(
     markdown: Entity<Markdown>,
     style: MarkdownStyle,
@@ -3713,7 +3722,7 @@ pub(crate) mod tests {
     use std::path::{Path, PathBuf};
     use std::rc::Rc;
     use std::sync::Arc;
-    use workspace::{Item, MultiWorkspace};
+    use workspace::MultiWorkspace;
 
     use crate::agent_panel;
     use crate::completion_provider::AgentContextSource;
