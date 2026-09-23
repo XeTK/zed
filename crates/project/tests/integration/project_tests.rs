@@ -20950,6 +20950,132 @@ mod disable_ai_settings_tests {
     }
 }
 
+mod window_accent_color_settings_tests {
+    use gpui::{Rgba, TestAppContext};
+    use project::*;
+    use settings::{
+        LocalSettingsKind, LocalSettingsPath, Settings, SettingsLocation, SettingsStore,
+    };
+    use worktree::WorktreeId;
+
+    use super::{FakeFs, Path, init_test, json, path};
+
+    #[gpui::test]
+    async fn test_window_accent_color_defaults_to_none(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            settings::init(cx);
+            assert_eq!(
+                WindowAccentColorSettings::get_global(cx).window_accent_color,
+                None,
+                "Default should be unset, falling back to the active theme's color"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_window_accent_color_project_level_settings(cx: &mut TestAppContext) {
+        cx.update(|cx| settings::init(cx));
+
+        let worktree_id = WorktreeId::from_usize(1);
+        let rel_path = |path: &str| -> std::sync::Arc<util::rel_path::RelPath> {
+            std::sync::Arc::from(util::rel_path::RelPath::from_unix_str(path).unwrap())
+        };
+        let project_path = rel_path("project");
+        let settings_location = SettingsLocation {
+            worktree_id,
+            path: project_path.as_ref(),
+        };
+
+        cx.update_global::<SettingsStore, _>(|store, cx| {
+            store
+                .set_local_settings(
+                    worktree_id,
+                    LocalSettingsPath::InWorktree(project_path.clone()),
+                    LocalSettingsKind::Settings,
+                    Some(r##"{ "window_accent_color": "#3b82f6" }"##),
+                    cx,
+                )
+                .unwrap();
+        });
+
+        cx.update(|cx| {
+            let settings = WindowAccentColorSettings::get(Some(settings_location), cx);
+            assert_eq!(
+                settings.window_accent_color,
+                Some(Rgba::try_from("#3b82f6").unwrap()),
+                "Project-level window_accent_color should resolve to the configured color"
+            );
+        });
+
+        // Clearing the local setting should fall back to the default (unset).
+        cx.update_global::<SettingsStore, _>(|store, cx| {
+            store
+                .set_local_settings(
+                    worktree_id,
+                    LocalSettingsPath::InWorktree(project_path.clone()),
+                    LocalSettingsKind::Settings,
+                    Some("{}"),
+                    cx,
+                )
+                .unwrap();
+        });
+
+        cx.update(|cx| {
+            let settings = WindowAccentColorSettings::get(Some(settings_location), cx);
+            assert_eq!(
+                settings.window_accent_color, None,
+                "Clearing the project-level setting should fall back to unset"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_window_accent_color_project_setting_live_reload(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            path!("/dir"),
+            json!({
+                ".zed": {
+                    "settings.json": r##"{ "window_accent_color": "#3b82f6" }"##
+                },
+                "a.rs": "fn a() {}",
+            }),
+        )
+        .await;
+
+        let project = Project::test(fs.clone(), [path!("/dir").as_ref()], cx).await;
+        cx.executor().run_until_parked();
+
+        project.read_with(cx, |project, cx| {
+            let location = project.primary_settings_location(cx).unwrap();
+            assert_eq!(
+                WindowAccentColorSettings::get(Some(location), cx).window_accent_color,
+                Some(Rgba::try_from("#3b82f6").unwrap()),
+            );
+        });
+
+        fs.atomic_write(
+            Path::new(path!("/dir/.zed/settings.json")).to_owned(),
+            "{}".into(),
+        )
+        .await
+        .unwrap();
+
+        cx.run_until_parked();
+
+        project.read_with(cx, |project, cx| {
+            let location = project.primary_settings_location(cx).unwrap();
+            assert_eq!(
+                WindowAccentColorSettings::get(Some(location), cx).window_accent_color,
+                None,
+                "Removing the local setting should revert to unset after live reload"
+            );
+        });
+    }
+}
+
 #[gpui::test]
 async fn test_worktree_released_when_creation_caller_is_cancelled(cx: &mut gpui::TestAppContext) {
     init_test(cx);
