@@ -1,0 +1,91 @@
+# Builds an actual Zed.app (in a .dmg) on the mac runner and uploads it as an
+# artifact, using the project's own script/bundle-mac rather than a bare
+# `cargo build`. Runs on pushes to main and on demand only: a release build
+# (lto = "thin", codegen-units = 1) is far slower than the test job, and the
+# runner takes one job at a time, so this shouldn't run for every PR.
+#
+# Unsigned: script/bundle-mac only codesigns/notarizes for real when
+# MACOS_CERTIFICATE/APPLE_NOTARIZATION_* secrets are set (none are, here), and
+# otherwise falls back to ad-hoc signing (`codesign --sign -`) on its own - no
+# workflow-level branching needed for that. Ad-hoc signing is enough to run the
+# app locally, but a copy downloaded on another Mac is quarantined by
+# Gatekeeper and needs `xattr -cr Zed.app` or a right-click "Open" the first
+# time, since it isn't notarized.
+name: build-mac
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+concurrency:
+  group: build-mac-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  build:
+    runs-on: macos
+    timeout-minutes: 120
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          clean: false
+
+      - name: Use the pinned Rust toolchain via rustup
+        # Same as test-mac.yml: the runner's default cargo doesn't match
+        # rust-toolchain.toml, and script/bundle-mac's `rustup target add`
+        # needs rustup to be the active `rustup`/`cargo` on PATH.
+        run: |
+          if ! command -v rustup >/dev/null 2>&1 && [ ! -x "${HOME}/.cargo/bin/rustup" ]; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --profile minimal --default-toolchain none
+          fi
+          echo "${HOME}/.cargo/bin" >> "$GITHUB_PATH"
+          export PATH="${HOME}/.cargo/bin:${PATH}"
+          rustup toolchain install
+          rustup show
+          cargo --version
+
+      - name: Ensure Node is available
+        # script/bundle-mac's DMG step runs `npm install --global dmg-license
+        # minimist` unconditionally. Unverified whether Node is already on this
+        # runner, so install it if not rather than assume.
+        run: |
+          if ! command -v npm >/dev/null 2>&1; then
+            brew install node
+          fi
+          node --version
+          npm --version
+
+      - name: Clear target dir if it has grown too large
+        # This runner is persistent (not ephemeral), so a stale target/ can
+        # accumulate across runs indefinitely without this. Deliberately not
+        # using a persistent CARGO_TARGET_DIR override here (unlike an earlier
+        # revision of this workflow): script/bundle-mac locates its build
+        # output and constructs the .dmg path from a hardcoded "target/..."
+        # relative path, not $CARGO_TARGET_DIR, so overriding it would make the
+        # DMG-creation step look in the wrong place.
+        run: ./script/clear-target-dir-if-larger-than 350 200
+
+      - name: Build and bundle zed (release)
+        run: ./script/bundle-mac
+
+      - name: Locate the DMG
+        id: dmg
+        run: |
+          target_triple="$(rustc --version --verbose | grep host | cut -d' ' -f2)"
+          dmg_path=$(ls target/"${target_triple}"/release/Zed-*.dmg)
+          echo "path=${dmg_path}" >> "$GITHUB_OUTPUT"
+          ls -lh "${dmg_path}"
+
+      - name: Upload Zed.app
+        uses: actions/upload-artifact@v4
+        with:
+          name: zed-macos
+          path: ${{ steps.dmg.outputs.path }}
+          retention-days: 14
