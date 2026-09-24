@@ -8,6 +8,15 @@ sequential-db-tests = { max-threads = 1 }
 filter = 'package(db)'
 test-group = 'sequential-db-tests'
 
+# This test sleeps 10ms and asserts the measured poll stays under 40ms, so it
+# fails when other tests are saturating the CPUs (the sleep overshoots to
+# 45-70ms on a loaded machine). Retrying immediately doesn't help because the
+# retries run in the same busy moment. Give it the whole thread pool so it runs
+# while nothing else does.
+[[profile.default.overrides]]
+filter = 'package(gpui) and test(foreground_work_excludes_setup_before_trace_scope_starts)'
+threads-required = 'num-test-threads'
+
 # Run slowest tests first.
 #
 [[profile.default.overrides]]
