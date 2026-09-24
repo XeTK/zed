@@ -1731,3 +1731,53 @@ async fn test_nearest_retained_workspace_skips_disconnected_workspace(cx: &mut T
         );
     });
 }
+
+#[gpui::test]
+async fn test_project_group_accent_color(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(
+        path!("/colored"),
+        json!({
+            ".zed": { "settings.json": r##"{ "window_accent_color": "#3b82f6" }"## },
+            "file.txt": "",
+        }),
+    )
+    .await;
+    fs.insert_tree(path!("/plain"), json!({ "file.txt": "" }))
+        .await;
+    fs.insert_tree(
+        path!("/not_open"),
+        json!({ ".zed": { "settings.json": r##"{ "window_accent_color": "#ef4444" }"## } }),
+    )
+    .await;
+
+    let colored = Project::test(fs.clone(), [path!("/colored").as_ref()], cx).await;
+    let plain = Project::test(fs.clone(), [path!("/plain").as_ref()], cx).await;
+    let not_open = Project::test(fs.clone(), [path!("/not_open").as_ref()], cx).await;
+
+    let colored_key = colored.read_with(cx, |project, cx| project.project_group_key(cx));
+    let plain_key = plain.read_with(cx, |project, cx| project.project_group_key(cx));
+    let not_open_key = not_open.read_with(cx, |project, cx| project.project_group_key(cx));
+
+    let (multi_workspace, cx) = setup_multi_workspace(&[colored, plain], cx);
+    cx.run_until_parked();
+
+    multi_workspace.read_with(cx, |multi_workspace, cx| {
+        assert_eq!(
+            multi_workspace.project_group_accent_color(&colored_key, cx),
+            Some(gpui::Rgba::try_from("#3b82f6").unwrap().into()),
+            "a group whose project sets window_accent_color should report it"
+        );
+        assert_eq!(
+            multi_workspace.project_group_accent_color(&plain_key, cx),
+            None,
+            "a group without the setting has no accent color"
+        );
+        assert_eq!(
+            multi_workspace.project_group_accent_color(&not_open_key, cx),
+            None,
+            "a group with no loaded workspace has no accent color yet"
+        );
+    });
+}
