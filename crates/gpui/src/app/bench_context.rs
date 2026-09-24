@@ -1386,6 +1386,7 @@ mod tests {
         });
         run_task_to_completion(&foreground_executor, setup_task);
 
+        let scope_start = Instant::now();
         let trace_scope = TraceScope::start(journal.collector());
 
         let measured_task = foreground_executor.spawn(async move {
@@ -1397,19 +1398,29 @@ mod tests {
         let report = BenchReport::default();
         report.record_foreground_events(events.foreground_events());
 
-        let summary = report
+        report
             .foreground_work()
             .expect("the measured task's poll should be reported");
-        assert!(
-            summary.max < Duration::from_millis(40),
-            "setup work's 80ms poll must not leak into the measured summary, got {:?}",
-            summary.max
-        );
-        assert!(
-            summary.total < Duration::from_millis(40),
-            "setup work's 80ms poll must not leak into the measured total, got {:?}",
-            summary.total
-        );
+
+        // This deliberately doesn't bound the measured task's own poll time.
+        // It sleeps 10ms, but how long that really takes depends on machine
+        // load (a busy CI runner reported 46-90ms for it), which says nothing
+        // about whether setup leaked. Instead check the invariant directly:
+        // `thread::sleep` never returns early, so the setup poll lasted at
+        // least 80ms, and any substantial event in the window that began before
+        // the scope started is that poll leaking in. The tiny poll that observes
+        // the setup task finishing can straddle the boundary, so small polls
+        // are ignored.
+        for event in events.foreground_events() {
+            let polled = match event {
+                ForegroundEvent::SmallPolls(flush) => flush.summary.total,
+                _ => event.duration(),
+            };
+            assert!(
+                !(event.start_time() < scope_start && polled >= Duration::from_millis(70)),
+                "setup work leaked into the measured window: {event:?}"
+            );
+        }
     }
 
     #[test]
