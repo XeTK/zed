@@ -13,7 +13,7 @@ use agent_client_protocol::schema::v1 as acp;
 use agent_servers::AgentServerDelegate;
 use agent_servers::{AgentServer, GEMINI_TERMINAL_AUTH_METHOD_ID};
 use agent_settings::{AgentProfileId, AgentSettings};
-use anyhow::{Result, anyhow};
+use anyhow::{Context as _, Result, anyhow};
 #[cfg(feature = "audio")]
 use audio::{Audio, Sound};
 use buffer_diff::BufferDiff;
@@ -73,8 +73,8 @@ use util::{
     time::duration_alt_display,
 };
 use workspace::{
-    CollaboratorId, Item, MultiWorkspace, NewTerminal, PathList, Workspace,
-    path_link::sanitize_path_text,
+    CollaboratorId, Item, ItemId, MultiWorkspace, NewTerminal, PathList, SerializableItem,
+    Workspace, WorkspaceId, path_link::sanitize_path_text,
 };
 use zed_actions::agent::{Chat, ToggleModelSelector};
 
@@ -3488,6 +3488,146 @@ impl Item for ConversationView {
     }
 }
 
+impl SerializableItem for ConversationView {
+    fn serialized_item_kind() -> &'static str {
+        "AgentConversation"
+    }
+
+    fn cleanup(
+        workspace_id: WorkspaceId,
+        alive_items: Vec<ItemId>,
+        _window: &mut Window,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<()>> {
+        let db = conversation_tab_persistence::ConversationTabDb::global(cx);
+        workspace::delete_unloaded_items(
+            alive_items,
+            workspace_id,
+            "agent_conversation_tabs",
+            &db,
+            cx,
+        )
+    }
+
+    fn deserialize(
+        _project: Entity<Project>,
+        workspace: WeakEntity<Workspace>,
+        workspace_id: WorkspaceId,
+        item_id: ItemId,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<Entity<Self>>> {
+        let db = conversation_tab_persistence::ConversationTabDb::global(cx);
+        window.spawn(cx, async move |cx| {
+            let thread_id = db
+                .get_thread_id(item_id, workspace_id)?
+                .context("no thread recorded for this conversation tab")?;
+            cx.update(|window, cx| {
+                let workspace = workspace.upgrade().context("workspace was dropped")?;
+                let panel = workspace
+                    .read(cx)
+                    .panel::<AgentPanel>(cx)
+                    .context("the agent panel is not available")?;
+                let agent = ThreadMetadataStore::try_global(cx)
+                    .and_then(|store| {
+                        store
+                            .read(cx)
+                            .entry(thread_id)
+                            .map(|metadata| Agent::from(metadata.agent_id.clone()))
+                    })
+                    .context("the thread no longer exists")?;
+                panel.update(cx, |panel, cx| {
+                    panel.load_agent_thread(
+                        agent,
+                        thread_id,
+                        None,
+                        None,
+                        false,
+                        AgentThreadSource::AgentPanel,
+                        window,
+                        cx,
+                    );
+                    panel
+                        .conversation_view_for_id(&thread_id, cx)
+                        .cloned()
+                        .context("the thread could not be restored")
+                })
+            })?
+        })
+    }
+
+    fn serialize(
+        &mut self,
+        workspace: &mut Workspace,
+        item_id: ItemId,
+        _closing: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<Task<anyhow::Result<()>>> {
+        let workspace_id = workspace.database_id()?;
+        let thread_id = self.thread_id;
+        let db = conversation_tab_persistence::ConversationTabDb::global(cx);
+        Some(cx.background_spawn(async move {
+            db.save_thread_id(item_id, workspace_id, thread_id).await
+        }))
+    }
+
+    fn should_serialize(&self, _event: &Self::Event) -> bool {
+        false
+    }
+}
+
+mod conversation_tab_persistence {
+    use crate::thread_metadata_store::ThreadId;
+    use db::{
+        query,
+        sqlez::{domain::Domain, thread_safe_connection::ThreadSafeConnection},
+        sqlez_macros::sql,
+    };
+    use workspace::{ItemId, WorkspaceDb, WorkspaceId};
+
+    pub struct ConversationTabDb(ThreadSafeConnection);
+
+    impl Domain for ConversationTabDb {
+        const NAME: &str = stringify!(ConversationTabDb);
+
+        const MIGRATIONS: &[&str] = &[sql!(
+            CREATE TABLE agent_conversation_tabs (
+                workspace_id INTEGER,
+                item_id INTEGER UNIQUE,
+
+                thread_id BLOB,
+
+                PRIMARY KEY(workspace_id, item_id),
+                FOREIGN KEY(workspace_id) REFERENCES workspaces(workspace_id)
+                ON DELETE CASCADE
+            ) STRICT;
+        )];
+    }
+
+    db::static_connection!(ConversationTabDb, [WorkspaceDb]);
+
+    impl ConversationTabDb {
+        query! {
+            pub async fn save_thread_id(
+                item_id: ItemId,
+                workspace_id: WorkspaceId,
+                thread_id: ThreadId
+            ) -> Result<()> {
+                INSERT OR REPLACE INTO agent_conversation_tabs(item_id, workspace_id, thread_id)
+                VALUES (?, ?, ?)
+            }
+        }
+
+        query! {
+            pub fn get_thread_id(item_id: ItemId, workspace_id: WorkspaceId) -> Result<Option<ThreadId>> {
+                SELECT thread_id
+                FROM agent_conversation_tabs
+                WHERE item_id = ? AND workspace_id = ?
+            }
+        }
+    }
+}
+
 fn render_agent_markdown(
     markdown: Entity<Markdown>,
     style: MarkdownStyle,
@@ -3813,6 +3953,34 @@ pub(crate) mod tests {
         assert!(
             matches!(error, ThreadError::ZedPaymentRequired),
             "expected Zed upgrade prompt, got: {error:?}"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_conversation_tab_thread_id_round_trips_through_database(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_global(db::AppDatabase::test_new()));
+        let db = cx.update(|cx| conversation_tab_persistence::ConversationTabDb::global(cx));
+        let workspace_id = cx
+            .update(|cx| workspace::WorkspaceDb::global(cx))
+            .next_id()
+            .await
+            .expect("a workspace row should be creatable");
+
+        let thread_id = ThreadId::new();
+        db.save_thread_id(7, workspace_id, thread_id)
+            .await
+            .expect("saving a tab's thread id should succeed");
+
+        assert_eq!(
+            db.get_thread_id(7, workspace_id)
+                .expect("reading should succeed"),
+            Some(thread_id)
+        );
+        assert_eq!(
+            db.get_thread_id(8, workspace_id)
+                .expect("reading should succeed"),
+            None,
+            "an unrelated tab has no recorded thread"
         );
     }
 
