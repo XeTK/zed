@@ -47,6 +47,7 @@ pub struct ThreadItem {
     highlight_positions: Vec<usize>,
     timestamp: SharedString,
     notified: bool,
+    has_unsent_draft: bool,
     status: AgentThreadStatus,
     selected: bool,
     focused: bool,
@@ -82,6 +83,7 @@ impl ThreadItem {
             highlight_positions: Vec::new(),
             timestamp: "".into(),
             notified: false,
+            has_unsent_draft: false,
             status: AgentThreadStatus::default(),
             selected: false,
             focused: false,
@@ -136,6 +138,13 @@ impl ThreadItem {
 
     pub fn notified(mut self, notified: bool) -> Self {
         self.notified = notified;
+        self
+    }
+
+    /// Marks that this thread has an unsent message sitting in its composer,
+    /// so it can be flagged without opening the thread.
+    pub fn has_unsent_draft(mut self, has_unsent_draft: bool) -> Self {
+        self.has_unsent_draft = has_unsent_draft;
         self
     }
 
@@ -332,6 +341,12 @@ impl RenderOnce for ThreadItem {
                 Icon::new(IconName::Circle)
                     .size(IconSize::Small)
                     .color(Color::Accent),
+            )
+        } else if self.has_unsent_draft {
+            Some(
+                Icon::new(IconName::Pencil)
+                    .size(IconSize::Small)
+                    .color(Color::Muted),
             )
         } else {
             None

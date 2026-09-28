@@ -361,6 +361,10 @@ struct ThreadEntry {
     is_background: bool,
     is_title_generating: bool,
     draft: Option<DraftKind>,
+    /// Whether this (already-sent) thread has an unsent message sitting in
+    /// its composer. Distinct from `draft`, which marks a thread that has no
+    /// sent messages at all yet.
+    has_unsent_draft: bool,
     highlight_positions: Vec<usize>,
     worktrees: Vec<ThreadItemWorktreeInfo>,
     diff_stats: DiffStats,
@@ -1616,6 +1620,12 @@ impl Sidebar {
                         // pass below downgrades them to `Empty` if no draft
                         // label can be derived.
                         let draft = row.is_draft().then_some(DraftKind::WithContent);
+                        // A brand-new draft thread's unsent text is already
+                        // surfaced via `draft`'s own placeholder/label; only
+                        // flag already-sent threads here to avoid a
+                        // redundant second indicator on the same row.
+                        let has_unsent_draft = draft.is_none()
+                            && agent_ui::draft_prompt_store::read(row.thread_id, cx).is_some();
                         Arc::new(ThreadEntry {
                             metadata: row,
                             icon,
@@ -1626,6 +1636,7 @@ impl Sidebar {
                             is_background: false,
                             is_title_generating: false,
                             draft,
+                            has_unsent_draft,
                             highlight_positions: Vec::new(),
                             worktrees,
                             diff_stats: DiffStats::default(),
@@ -6302,6 +6313,7 @@ impl Sidebar {
                 this.icon_color(Color::Custom(cx.theme().colors().icon_muted.opacity(0.2)))
             })
             .status(thread.status)
+            .has_unsent_draft(thread.has_unsent_draft)
             .is_remote(is_remote)
             .when_some(icon_svg, |this, svg| {
                 this.custom_icon_from_external_svg(svg)

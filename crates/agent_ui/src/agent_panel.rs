@@ -9185,6 +9185,78 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn test_unsent_draft_persists_for_already_sent_thread(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.update(|cx| {
+            agent::ThreadStore::init_global(cx);
+            language_model::LanguageModelRegistry::test(cx);
+        });
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree("/project", json!({ "file.txt": "" })).await;
+        let project = Project::test(fs.clone(), [Path::new("/project")], cx).await;
+
+        let multi_workspace =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace
+            .read_with(cx, |mw, _cx| mw.workspace().clone())
+            .unwrap();
+
+        let cx = &mut VisualTestContext::from_window(multi_workspace.into(), cx);
+        let panel = workspace.update_in(cx, |workspace, window, cx| {
+            let panel = cx.new(|cx| AgentPanel::new(workspace, window, cx));
+            workspace.add_panel(panel.clone(), window, cx);
+            panel
+        });
+
+        let stub_connection =
+            crate::test_support::set_stub_agent_connection(StubAgentConnection::new());
+        stub_connection.set_next_prompt_updates(vec![acp::SessionUpdate::AgentMessageChunk(
+            acp::ContentChunk::new("ok".into()),
+        )]);
+
+        // Create a real (already-sent) thread.
+        panel.update_in(cx, |panel, window, cx| {
+            panel.selected_agent = Agent::Stub;
+            panel.activate_draft(true, AgentThreadSource::AgentPanel, window, cx);
+        });
+        cx.run_until_parked();
+        crate::test_support::send_message(&panel, cx);
+        let real_thread_id = crate::test_support::active_thread_id(&panel, cx);
+
+        assert_eq!(
+            cx.update(|_, cx| crate::draft_prompt_store::read(real_thread_id, cx)),
+            None,
+            "a thread with nothing typed into its composer has no unsent draft"
+        );
+
+        // Type a follow-up without sending it.
+        crate::test_support::type_draft_prompt(&panel, "an unsent follow-up", cx);
+
+        assert!(
+            cx.update(|_, cx| crate::draft_prompt_store::read(real_thread_id, cx))
+                .is_some(),
+            "unsent composer text on an already-sent thread should now persist, \
+             not just on brand-new draft threads"
+        );
+
+        // Sending clears the composer, which should clear the persisted
+        // draft again. `send_message` doesn't drain the persist debounce
+        // itself (only `type_draft_prompt` does), so advance the clock the
+        // same way before checking.
+        crate::test_support::send_message(&panel, cx);
+        cx.executor()
+            .advance_clock(crate::conversation_view::DRAFT_PROMPT_PERSIST_DEBOUNCE * 2);
+        cx.run_until_parked();
+
+        assert_eq!(
+            cx.update(|_, cx| crate::draft_prompt_store::read(real_thread_id, cx)),
+            None,
+            "sending the unsent text should clear its persisted draft"
+        );
+    }
+
+    #[gpui::test]
     async fn test_reloaded_ephemeral_draft_preserves_original_agent(cx: &mut TestAppContext) {
         init_test(cx);
         cx.update(|cx| {

@@ -1885,7 +1885,7 @@ impl ConversationView {
                 cx.notify();
             }
             AcpThreadEvent::PromptUpdated => {
-                if !is_subagent && thread.read(cx).is_draft_thread() {
+                if !is_subagent {
                     self.schedule_draft_prompt_persist(cx);
                 }
                 cx.notify();
@@ -1903,9 +1903,6 @@ impl ConversationView {
             let persist = this.update(cx, |this, cx| {
                 let thread = this.root_thread(cx)?;
                 let thread = thread.read(cx);
-                if !thread.is_draft_thread() {
-                    return None;
-                }
                 let snapshot: Vec<acp::ContentBlock> = thread
                     .draft_prompt()
                     .map(|p| p.to_vec())
