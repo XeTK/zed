@@ -1,12 +1,14 @@
 //! Per-thread draft prompt persistence and display label rendering.
 //!
-//! Drafts are persisted in the thread metadata store with `session_id: None`,
-//! but their unsent prompt text is kept separately here so we don't have to
-//! plumb draft-prompt storage through the native agent's thread database.
+//! Unsent composer text is persisted here for every thread, not just brand
+//! new draft threads (`session_id: None` in the thread metadata store) - an
+//! already-sent thread can also have unsent text sitting in its composer,
+//! which the sidebar flags without needing to plumb this through the native
+//! agent's thread database.
 //!
-//! The display-label helpers ([`display_label_for_draft`] and friends) live
-//! alongside the storage so the sidebar's preview rendering can't drift from
-//! the format we persist.
+//! The display-label helpers ([`display_label_for_draft`] and friends) only
+//! apply to brand new draft threads and live alongside the storage so the
+//! sidebar's preview rendering can't drift from the format we persist.
 
 use agent::ZED_AGENT_ID;
 use agent_client_protocol::schema::v1 as acp;

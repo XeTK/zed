@@ -89,3 +89,31 @@ jobs:
           name: zed-macos
           path: ${{ steps.dmg.outputs.path }}
           retention-days: 14
+
+      - name: Publish nightly release for the Homebrew tap
+        # Actions artifacts (above) need auth and expire after 14 days, so
+        # they're no good as a stable Homebrew Cask download URL. A release
+        # asset is public and permanent, so re-publish the same "nightly" tag
+        # each run - deleting the old release first makes this idempotent
+        # rather than accumulating a new release per push.
+        env:
+          GITEA_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          api="https://gitea.xetk.co.uk/api/v1/repos/xetk/zed"
+          dmg_path="${{ steps.dmg.outputs.path }}"
+
+          existing_id=$(curl -sf -H "Authorization: token ${GITEA_TOKEN}" "${api}/releases/tags/nightly" \
+            | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("id",""))' 2>/dev/null || true)
+          if [ -n "${existing_id}" ]; then
+            curl -sf -X DELETE -H "Authorization: token ${GITEA_TOKEN}" "${api}/releases/${existing_id}"
+          fi
+          curl -s -X DELETE -H "Authorization: token ${GITEA_TOKEN}" "${api}/tags/nightly" >/dev/null || true
+
+          release=$(curl -sf -X POST -H "Authorization: token ${GITEA_TOKEN}" -H "Content-Type: application/json" \
+            -d "{\"tag_name\":\"nightly\",\"name\":\"Nightly build\",\"body\":\"Built from $(git rev-parse HEAD)\",\"prerelease\":true,\"target_commitish\":\"main\"}" \
+            "${api}/releases")
+          release_id=$(echo "${release}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+
+          curl -sf -X POST -H "Authorization: token ${GITEA_TOKEN}" \
+            -F "attachment=@${dmg_path};filename=Zed-Dev.dmg" \
+            "${api}/releases/${release_id}/assets?name=Zed-Dev.dmg"

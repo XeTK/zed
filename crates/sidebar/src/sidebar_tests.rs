@@ -1407,6 +1407,7 @@ async fn test_neighboring_activatable_entry_stays_within_project(cx: &mut TestAp
             is_background: false,
             is_title_generating: false,
             draft: None,
+            has_unsent_draft: false,
             highlight_positions: Vec::new(),
             worktrees: Vec::new(),
             diff_stats: DiffStats::default(),
@@ -1499,6 +1500,7 @@ async fn test_visible_entries_as_strings(cx: &mut TestAppContext) {
                 is_background: false,
                 is_title_generating: false,
                 draft: None,
+                has_unsent_draft: false,
                 highlight_positions: Vec::new(),
                 worktrees: Vec::new(),
                 diff_stats: DiffStats::default(),
@@ -1526,6 +1528,7 @@ async fn test_visible_entries_as_strings(cx: &mut TestAppContext) {
                 is_background: false,
                 is_title_generating: false,
                 draft: None,
+                has_unsent_draft: false,
                 highlight_positions: Vec::new(),
                 worktrees: Vec::new(),
                 diff_stats: DiffStats::default(),
@@ -1553,6 +1556,7 @@ async fn test_visible_entries_as_strings(cx: &mut TestAppContext) {
                 is_background: false,
                 is_title_generating: false,
                 draft: None,
+                has_unsent_draft: false,
                 highlight_positions: Vec::new(),
                 worktrees: Vec::new(),
                 diff_stats: DiffStats::default(),
@@ -1581,6 +1585,7 @@ async fn test_visible_entries_as_strings(cx: &mut TestAppContext) {
                 is_background: false,
                 is_title_generating: false,
                 draft: None,
+                has_unsent_draft: false,
                 highlight_positions: Vec::new(),
                 worktrees: Vec::new(),
                 diff_stats: DiffStats::default(),
@@ -1609,6 +1614,7 @@ async fn test_visible_entries_as_strings(cx: &mut TestAppContext) {
                 is_background: true,
                 is_title_generating: false,
                 draft: None,
+                has_unsent_draft: false,
                 highlight_positions: Vec::new(),
                 worktrees: Vec::new(),
                 diff_stats: DiffStats::default(),
@@ -6356,6 +6362,75 @@ async fn test_plus_button_reuses_empty_draft(cx: &mut TestAppContext) {
         "the row should be the empty-draft placeholder"
     );
     assert_eq!(draft_rows[0].metadata.thread_id, first_id);
+}
+
+#[gpui::test]
+async fn test_sidebar_flags_already_sent_thread_with_unsent_draft(cx: &mut TestAppContext) {
+    let project = init_test_project_with_agent_panel("/my-project", cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let (sidebar, _panel) = setup_sidebar_with_agent_panel(&multi_workspace, cx);
+    cx.run_until_parked();
+
+    save_named_thread_metadata("main-thread", "Main Thread", &project, cx).await;
+    let thread_id = cx.update(|_, cx| {
+        ThreadMetadataStore::global(cx)
+            .read(cx)
+            .entries()
+            .find(|e| e.session_id.as_ref() == Some(&acp::SessionId::new(Arc::from("main-thread"))))
+            .expect("thread metadata should have been saved")
+            .thread_id
+    });
+    cx.run_until_parked();
+
+    let entry_for_thread = |sidebar: &Entity<Sidebar>, cx: &TestAppContext| {
+        sidebar.read_with(cx, |sidebar, _| {
+            sidebar
+                .contents
+                .entries
+                .iter()
+                .find_map(|entry| match entry {
+                    ListEntry::Thread(t) if t.metadata.thread_id == thread_id => Some(t.clone()),
+                    _ => None,
+                })
+                .expect("the sent thread should have a sidebar row")
+        })
+    };
+
+    assert!(
+        !entry_for_thread(&sidebar, cx).has_unsent_draft,
+        "a thread with nothing unsent in its composer should not be flagged"
+    );
+
+    cx.update(|_, cx| {
+        agent_ui::draft_prompt_store::write(
+            thread_id,
+            &[acp::ContentBlock::Text(acp::TextContent::new(
+                "an unsent follow-up",
+            ))],
+            cx,
+        )
+    })
+    .await
+    .expect("unsent draft prompt should persist");
+    sidebar.update(cx, |sidebar, cx| sidebar.update_entries(cx));
+    cx.run_until_parked();
+
+    assert!(
+        entry_for_thread(&sidebar, cx).has_unsent_draft,
+        "an already-sent thread with unsent composer text should be flagged"
+    );
+
+    cx.update(|_, cx| agent_ui::draft_prompt_store::delete(thread_id, cx))
+        .await
+        .expect("clearing the unsent draft should succeed");
+    sidebar.update(cx, |sidebar, cx| sidebar.update_entries(cx));
+    cx.run_until_parked();
+
+    assert!(
+        !entry_for_thread(&sidebar, cx).has_unsent_draft,
+        "the flag should clear once the unsent draft is gone"
+    );
 }
 
 #[gpui::test]
