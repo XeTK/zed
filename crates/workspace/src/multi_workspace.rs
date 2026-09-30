@@ -929,6 +929,50 @@ impl MultiWorkspace {
         true
     }
 
+    /// Moves `key`'s project group to sit directly before `target`'s current
+    /// position, for drag-and-drop reordering in the sidebar. A no-op if
+    /// either group can't be found or they're already adjacent in that order.
+    pub fn reorder_project_group_before(
+        &mut self,
+        key: &ProjectGroupKey,
+        target: &ProjectGroupKey,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if key == target {
+            return false;
+        }
+        let Some(source_index) = self
+            .project_groups
+            .iter()
+            .position(|group| group.key == *key)
+        else {
+            return false;
+        };
+        let Some(target_index) = self
+            .project_groups
+            .iter()
+            .position(|group| group.key == *target)
+        else {
+            return false;
+        };
+        if source_index + 1 == target_index {
+            return false;
+        }
+
+        let group = self.project_groups.remove(source_index);
+        let insert_at = if source_index < target_index {
+            target_index - 1
+        } else {
+            target_index
+        };
+        self.project_groups.insert(insert_at, group);
+
+        cx.emit(MultiWorkspaceEvent::ProjectGroupsChanged);
+        self.serialize(cx);
+        cx.notify();
+        true
+    }
+
     pub fn workspaces_for_project_group(
         &self,
         key: &ProjectGroupKey,

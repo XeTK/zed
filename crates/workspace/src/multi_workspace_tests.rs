@@ -1781,3 +1781,72 @@ async fn test_project_group_accent_color(cx: &mut TestAppContext) {
         );
     });
 }
+
+#[gpui::test]
+async fn test_reorder_project_group_before_moves_group_between_others(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/project-a", json!({})).await;
+    cx.update(|cx| <dyn Fs>::set_global(fs.clone(), cx));
+
+    let project_a = Project::test(fs.clone(), ["/project-a".as_ref()], cx).await;
+    let key_a = project_a.read_with(cx, |project, cx| project.project_group_key(cx));
+    let (multi_workspace, cx) = setup_multi_workspace(&[project_a], cx);
+
+    let key_b = ProjectGroupKey::new(None, PathList::new(&[PathBuf::from("/project-b")]));
+    let key_c = ProjectGroupKey::new(None, PathList::new(&[PathBuf::from("/project-c")]));
+    multi_workspace.update(cx, |multi_workspace, _cx| {
+        multi_workspace.test_add_project_group(ProjectGroup {
+            key: key_b.clone(),
+            workspaces: Vec::new(),
+            expanded: true,
+        });
+        multi_workspace.test_add_project_group(ProjectGroup {
+            key: key_c.clone(),
+            workspaces: Vec::new(),
+            expanded: true,
+        });
+    });
+
+    let keys_in_order = |multi_workspace: &MultiWorkspace, cx: &App| -> Vec<ProjectGroupKey> {
+        multi_workspace
+            .project_groups(cx)
+            .into_iter()
+            .map(|group| group.key)
+            .collect()
+    };
+
+    multi_workspace.read_with(cx, |multi_workspace, cx| {
+        assert_eq!(
+            keys_in_order(multi_workspace, cx),
+            vec![key_a.clone(), key_b.clone(), key_c.clone()],
+            "groups start in the order they were added"
+        );
+    });
+
+    let moved = multi_workspace.update(cx, |multi_workspace, cx| {
+        multi_workspace.reorder_project_group_before(&key_c, &key_b, cx)
+    });
+    assert!(moved, "moving key_c before key_b should succeed");
+
+    multi_workspace.read_with(cx, |multi_workspace, cx| {
+        assert_eq!(
+            keys_in_order(multi_workspace, cx),
+            vec![key_a.clone(), key_c.clone(), key_b.clone()],
+            "key_c should now sit directly before key_b"
+        );
+    });
+
+    let no_op = multi_workspace.update(cx, |multi_workspace, cx| {
+        multi_workspace.reorder_project_group_before(&key_c, &key_c, cx)
+    });
+    assert!(!no_op, "moving a group before itself should be a no-op");
+
+    let already_adjacent = multi_workspace.update(cx, |multi_workspace, cx| {
+        multi_workspace.reorder_project_group_before(&key_a, &key_c, cx)
+    });
+    assert!(
+        !already_adjacent,
+        "a group already directly before the target should be a no-op"
+    );
+}
