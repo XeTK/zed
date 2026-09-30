@@ -1208,6 +1208,9 @@ pub struct Editor {
     suppress_selection_callback: bool,
     applicable_language_settings: HashMap<Option<LanguageName>, Arc<LanguageSettings>>,
     accent_data: Option<AccentData>,
+    /// The `(theme, editor_background)` pair that `accent_data` was last computed from, so
+    /// `fetch_accent_data` can skip its color-space math when neither has changed.
+    accent_data_source: Option<(*const Theme, Hsla)>,
     bracket_fetched_tree_sitter_chunks: HashMap<Range<text::Anchor>, HashSet<Range<BufferRow>>>,
     semantic_token_state: SemanticTokenState,
     pub(crate) refresh_matching_bracket_highlights_task: Task<()>,
@@ -2579,6 +2582,7 @@ impl Editor {
             applicable_language_settings: HashMap::default(),
             semantic_token_state: SemanticTokenState::new(cx, full_mode),
             accent_data: None,
+            accent_data_source: None,
             bracket_fetched_tree_sitter_chunks: HashMap::default(),
             number_deleted_lines: false,
             refresh_matching_bracket_highlights_task: Task::ready(()),
@@ -10229,21 +10233,32 @@ impl Editor {
         cx.notify();
     }
 
-    fn fetch_accent_data(&self, cx: &App) -> Option<AccentData> {
+    fn fetch_accent_data(&mut self, cx: &App) -> Option<AccentData> {
         if !self.mode.is_full() {
             return None;
         }
 
         let theme_settings = theme_settings::ThemeSettings::get_global(cx);
         let theme = cx.theme();
-        let accent_colors = theme.accents().clone();
         let editor_background = theme.colors().editor_background;
-        let auto_accent_colors =
-            AccentColors(crate::bracket_colorization::bracket_colorization_accents(
-                &accent_colors.0,
+        let source = (Arc::as_ptr(theme), editor_background);
+
+        let auto_accent_colors = if self.accent_data_source == Some(source) {
+            self.accent_data
+                .as_ref()
+                .map(|accent_data| accent_data.colors.clone())
+        } else {
+            None
+        };
+        self.accent_data_source = Some(source);
+        let auto_accent_colors = match auto_accent_colors {
+            Some(colors) => colors,
+            None => AccentColors(crate::bracket_colorization::bracket_colorization_accents(
+                &theme.accents().0,
                 theme.appearance,
                 editor_background,
-            ));
+            )),
+        };
 
         let accent_overrides = theme_settings
             .theme_overrides
