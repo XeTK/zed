@@ -350,6 +350,28 @@ enum DraftKind {
     Empty,
 }
 
+/// Drag payload for reordering project group headers in the sidebar.
+#[derive(Clone)]
+struct DraggedProjectGroup {
+    key: ProjectGroupKey,
+    label: SharedString,
+}
+
+impl Render for DraggedProjectGroup {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        h_flex()
+            .px_2()
+            .py_1()
+            .gap_1()
+            .rounded_md()
+            .bg(cx.theme().colors().element_background)
+            .border_1()
+            .border_color(cx.theme().colors().border)
+            .child(Icon::new(IconName::Folder).size(IconSize::Small))
+            .child(Label::new(self.label.clone()))
+    }
+}
+
 #[derive(Clone)]
 struct ThreadEntry {
     metadata: ThreadMetadata,
@@ -2346,6 +2368,10 @@ impl Sidebar {
 
         let key_for_toggle = key.clone();
         let key_for_focus = key.clone();
+        let key_for_drag = key.clone();
+        let key_for_drag_over = key.clone();
+        let key_for_drop = key.clone();
+        let label_text_for_drag = label.clone();
 
         // The fade gradient renders as a visible patch on transparent windows,
         // so truncate the label instead.
@@ -2531,6 +2557,42 @@ impl Sidebar {
                     }
                 }),
             )
+            .when(!is_sticky && !has_filter, |this| {
+                this.on_drag(
+                    DraggedProjectGroup {
+                        key: key_for_drag.clone(),
+                        label: label_text_for_drag.clone(),
+                    },
+                    |dragged, _click_offset, _window, cx| cx.new(|_| dragged.clone()),
+                )
+                .drag_over::<DraggedProjectGroup>(
+                    move |div, dragged: &DraggedProjectGroup, _, cx| {
+                        if dragged.key == key_for_drag_over {
+                            div
+                        } else {
+                            div.bg(cx.theme().colors().drop_target_background)
+                                .border_color(cx.theme().colors().drop_target_border)
+                        }
+                    },
+                )
+                .on_drop(cx.listener(
+                    move |this, dragged: &DraggedProjectGroup, _window, cx| {
+                        if dragged.key == key_for_drop {
+                            return;
+                        }
+                        let Some(multi_workspace) = this.multi_workspace.upgrade() else {
+                            return;
+                        };
+                        multi_workspace.update(cx, |multi_workspace, cx| {
+                            multi_workspace.reorder_project_group_before(
+                                &dragged.key,
+                                &key_for_drop,
+                                cx,
+                            );
+                        });
+                    },
+                ))
+            })
             .block_mouse_except_scroll();
 
         if !is_collapsed && !has_threads {
