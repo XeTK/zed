@@ -16,6 +16,29 @@ pub fn calculate_contrast_ratio(fg: Hsla, bg: Hsla) -> f32 {
     (lighter + 0.05) / (darker + 0.05)
 }
 
+/// Picks black or white, whichever has more contrast against `background`, for
+/// text drawn on a color that isn't known ahead of time (e.g. a user-chosen
+/// accent color).
+pub fn readable_text_color(background: Hsla) -> Hsla {
+    let white = Hsla {
+        h: 0.0,
+        s: 0.0,
+        l: 1.0,
+        a: 1.0,
+    };
+    let black = Hsla {
+        h: 0.0,
+        s: 0.0,
+        l: 0.0,
+        a: 1.0,
+    };
+    if calculate_contrast_ratio(white, background) >= calculate_contrast_ratio(black, background) {
+        white
+    } else {
+        black
+    }
+}
+
 /// Calculates the relative luminance of a color.
 ///
 /// The relative luminance is the relative brightness of any point in a colorspace,
@@ -66,5 +89,19 @@ mod tests {
         // Same color (should be 1:1)
         let red = hsla(0.0, 1.0, 0.5, 1.0);
         assert!((calculate_contrast_ratio(red, red) - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_readable_text_color_picks_the_higher_contrast_option() {
+        let white = hsla(0.0, 0.0, 1.0, 1.0);
+        let black = hsla(0.0, 0.0, 0.0, 1.0);
+
+        // Dark navy (#1e3a8a-ish) needs white text.
+        assert_eq!(readable_text_color(hsla(0.62, 0.64, 0.33, 1.0)), white);
+        // Light yellow needs black text.
+        assert_eq!(readable_text_color(hsla(0.15, 0.9, 0.8, 1.0)), black);
+        // Extremes.
+        assert_eq!(readable_text_color(black), white);
+        assert_eq!(readable_text_color(white), black);
     }
 }
