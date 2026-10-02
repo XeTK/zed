@@ -1281,17 +1281,20 @@ impl AcpConnection {
                         this.register_session(session_id.clone(), &thread, None, None, cx)
                     });
 
+                    // Messages replayed while loading predate this session, so they
+                    // must not be stamped with the current time.
+                    thread.update(cx, |thread, _| thread.set_replaying_history(true));
                     let response =
-                        match rpc_call(this.connection.clone(), session_id.clone(), directories)
-                            .await
-                        {
-                            Ok(response) => response,
-                            Err(err) => {
-                                this.sessions.borrow_mut().remove(&session_id);
-                                this.pending_sessions.borrow_mut().remove(&session_id);
-                                return Err(Arc::new(err));
-                            }
-                        };
+                        rpc_call(this.connection.clone(), session_id.clone(), directories).await;
+                    thread.update(cx, |thread, _| thread.set_replaying_history(false));
+                    let response = match response {
+                        Ok(response) => response,
+                        Err(err) => {
+                            this.sessions.borrow_mut().remove(&session_id);
+                            this.pending_sessions.borrow_mut().remove(&session_id);
+                            return Err(Arc::new(err));
+                        }
+                    };
 
                     let (modes, config_options) =
                         config_state(response.modes, response.config_options);

@@ -547,6 +547,8 @@ dependencies = [
  "text",
  "theme",
  "theme_settings",
+ "time",
+ "time_format",
  "ui",
  "unicode-script",
  "unicode-segmentation",

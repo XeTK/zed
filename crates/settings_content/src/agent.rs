@@ -74,6 +74,30 @@ pub enum ThinkingBlockDisplay {
     AlwaysCollapsed,
 }
 
+/// When to show the time a message was sent in the agent panel.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+    MergeFrom,
+    strum::VariantArray,
+    strum::VariantNames,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageTimestamps {
+    /// Show the time only while hovering over a message.
+    #[default]
+    OnHover,
+    /// Always show the time next to each message.
+    Always,
+}
+
 /// Threshold at which agent auto-compaction runs. See
 /// [`AutoCompactSettingsContent::threshold`] for the accepted formats.
 ///
@@ -347,6 +371,10 @@ pub struct AgentSettingsContent {
     ///
     /// Default: automatic
     pub thinking_display: Option<ThinkingBlockDisplay>,
+    /// When to show the time each message was sent in the agent panel.
+    ///
+    /// Default: on_hover
+    pub message_timestamps: Option<MessageTimestamps>,
     /// Whether clicking the stop button on a running terminal tool should also cancel the agent's generation.
     /// Note that this only applies to the stop button, not to ctrl+c inside the terminal.
     ///

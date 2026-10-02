@@ -40,7 +40,7 @@ use language_model::{
     LanguageModelProvider, LanguageModelProviderId, LanguageModelRegistry, Speed,
 };
 use notifications::status_toast::StatusToast;
-use settings::{update_settings_file, update_settings_file_with_completion};
+use settings::{MessageTimestamps, update_settings_file, update_settings_file_with_completion};
 use ui::{
     ButtonLike, CalloutBorderPosition, Checkbox, SpinnerLabel, SpinnerVariant, SplitButton,
     SplitButtonStyle, Tab, ToggleState,
@@ -52,6 +52,30 @@ use super::elicitation::{
     ElicitationCard, ElicitationCardHandlers, ElicitationFormState, should_render_elicitation,
 };
 use super::*;
+
+/// The short label and the full tooltip text for the time a message was sent,
+/// in the local time zone.
+fn message_timestamp_text(
+    created_at: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+    offset: time::UtcOffset,
+) -> Option<(String, String)> {
+    let to_offset_date_time = |timestamp: chrono::DateTime<chrono::Utc>| {
+        time::OffsetDateTime::from_unix_timestamp(timestamp.timestamp())
+            .ok()
+            .map(|timestamp| timestamp.to_offset(offset))
+    };
+    let created_at = to_offset_date_time(created_at)?;
+    let now = to_offset_date_time(now)?;
+    Some((
+        time_format::format_time(created_at),
+        time_format::format_local_timestamp(
+            created_at,
+            now,
+            time_format::TimestampFormat::EnhancedAbsolute,
+        ),
+    ))
+}
 
 const DATA_RETENTION_LEARN_MORE_URL: &str = "https://support.claude.com/en/articles/15425996-data-retention-practices-for-mythos-class-models";
 
@@ -6148,6 +6172,55 @@ impl ThreadView {
         .flex_grow_1()
     }
 
+    fn with_message_timestamp(
+        &self,
+        entry_ix: usize,
+        created_at: chrono::DateTime<chrono::Utc>,
+        message: AnyElement,
+        cx: &App,
+    ) -> AnyElement {
+        let offset = time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
+        let Some((label, tooltip)) = message_timestamp_text(created_at, chrono::Utc::now(), offset)
+        else {
+            return message;
+        };
+
+        let timestamp = h_flex()
+            .id(("message_timestamp", entry_ix))
+            .child(
+                Label::new(label)
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted),
+            )
+            .tooltip(Tooltip::text(tooltip));
+        let group_name = SharedString::from(format!("message_timestamp_group_{entry_ix}"));
+
+        match AgentSettings::get_global(cx).message_timestamps {
+            MessageTimestamps::Always => v_flex()
+                .w_full()
+                .child(message)
+                .child(h_flex().px_5().pb_1().justify_end().child(timestamp))
+                .into_any_element(),
+            MessageTimestamps::OnHover => div()
+                .group(group_name.clone())
+                .relative()
+                .w_full()
+                .child(message)
+                .child(
+                    h_flex()
+                        .absolute()
+                        .top_0()
+                        .right_2()
+                        .px_1()
+                        .rounded_sm()
+                        .bg(cx.theme().colors().panel_background)
+                        .child(timestamp)
+                        .visible_on_hover(group_name),
+                )
+                .into_any_element(),
+        }
+    }
+
     fn render_entry(
         &self,
         entry_ix: usize,
@@ -6354,6 +6427,7 @@ impl ThreadView {
                 chunks,
                 indented: _,
                 is_subagent_output: _,
+                created_at: _,
             }) => {
                 let mut is_blank = true;
                 let is_last = entry_ix + 1 == total_entries;
@@ -6486,6 +6560,18 @@ impl ThreadView {
             AgentThreadEntry::ContextCompaction(compaction) => {
                 self.render_context_compaction(entry_ix, compaction, window, cx)
             }
+        };
+
+        let message_created_at = match entry {
+            AgentThreadEntry::UserMessage(message) => message.created_at,
+            AgentThreadEntry::AssistantMessage(message) if !assistant_message_is_blank => {
+                message.created_at
+            }
+            _ => None,
+        };
+        let primary = match message_created_at {
+            Some(created_at) => self.with_message_timestamp(entry_ix, created_at, primary, cx),
+            None => primary,
         };
 
         let is_subagent_output = self.is_subagent()
@@ -12802,6 +12888,22 @@ mod tests {
     use std::path::Path;
     use util::path;
     use workspace::MultiWorkspace;
+
+    #[test]
+    fn test_message_timestamp_text_formats_the_creation_time() {
+        let created_at = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let offset = time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
+        let (label, tooltip) =
+            message_timestamp_text(created_at, created_at + chrono::Duration::days(30), offset)
+                .unwrap();
+
+        let expected = time::OffsetDateTime::from_unix_timestamp(1_700_000_000)
+            .unwrap()
+            .to_offset(offset);
+        assert_eq!(label, time_format::format_time(expected));
+        assert!(tooltip.contains(&label), "{tooltip} should include {label}");
+        assert_ne!(label, tooltip);
+    }
 
     #[test]
     fn test_tool_call_icon_tooltip() {
