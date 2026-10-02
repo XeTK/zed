@@ -4,7 +4,8 @@ use gpui::{AnyElement, ClickEvent, CursorStyle, Window};
 use ui::{CommonAnimationExt, Disclosure, Divider, DividerColor, Tooltip, prelude::*};
 use util::time::duration_alt_display;
 
-const ELAPSED_DISPLAY_THRESHOLD: Duration = Duration::from_secs(10);
+/// Runs shorter than this show no time, so quick tool calls do not flash "0s".
+pub const ELAPSED_DISPLAY_THRESHOLD: Duration = Duration::from_secs(1);
 
 type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 
