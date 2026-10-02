@@ -12931,7 +12931,17 @@ mod tests {
             });
         });
         cx.executor().run_until_parked();
-        assert_eq!(cx.window_title().as_deref(), Some("Zed — root1, root2"));
+        // The title's `${appName}` is the release channel's display name
+        // (Stable when no channel is set), which differs between builds.
+        let app_name = cx.update(|_, cx| {
+            ReleaseChannel::try_global(cx)
+                .unwrap_or(ReleaseChannel::Stable)
+                .display_name()
+        });
+        assert_eq!(
+            cx.window_title().as_deref(),
+            Some(format!("{app_name} — root1, root2").as_str())
+        );
 
         let item = cx.new(|cx| {
             TestItem::new(cx).with_project_items(&[TestProjectItem::new_in_worktree(
@@ -12948,7 +12958,7 @@ mod tests {
         let expected_file_path = path!("/root1/src/one.txt");
         assert_eq!(
             cx.window_title().as_deref(),
-            Some(format!("Zed — root1, root2 — one — {expected_file_path}").as_str())
+            Some(format!("{app_name} — root1, root2 — one — {expected_file_path}").as_str())
         );
     }
 
