@@ -7,6 +7,7 @@ use action_log::{ActionLog, ActionLogTelemetry};
 use agent_client_protocol::schema::{MaybeUndefined, v1 as acp};
 use agent_settings::AgentSettings;
 use anyhow::{Context as _, Result, anyhow};
+use chrono::{DateTime, Utc};
 use collections::HashSet;
 pub use connection::*;
 pub use diff::*;
@@ -300,6 +301,9 @@ pub struct UserMessage {
     pub chunks: Vec<acp::ContentBlock>,
     pub checkpoint: Option<Checkpoint>,
     pub indented: bool,
+    /// When the message was sent. `None` for messages restored from history
+    /// that was saved without a timestamp.
+    pub created_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug)]
@@ -332,6 +336,9 @@ pub struct AssistantMessage {
     pub chunks: Vec<AssistantMessageChunk>,
     pub indented: bool,
     pub is_subagent_output: bool,
+    /// When the first chunk of this message arrived. `None` for messages
+    /// restored from history that was saved without a timestamp.
+    pub created_at: Option<DateTime<Utc>>,
 }
 
 impl AssistantMessage {
@@ -2325,6 +2332,8 @@ pub struct AcpThread {
     /// gradually to create a fluid typing effect instead of choppy chunk-at-a-time
     /// updates.
     streaming_text_buffer: Option<StreamingTextBuffer>,
+    replaying_history: bool,
+    pending_assistant_created_at: Option<Option<DateTime<Utc>>>,
     idle_sleep_prevention: IdleSleepPrevention,
 }
 
@@ -2572,6 +2581,8 @@ impl AcpThread {
             draft_prompt: None,
             ui_scroll_position: None,
             streaming_text_buffer: None,
+            replaying_history: false,
+            pending_assistant_created_at: None,
             idle_sleep_prevention: IdleSleepPrevention::Inactive,
         }
     }
@@ -2921,14 +2932,52 @@ impl AcpThread {
         indented: bool,
         cx: &mut Context<Self>,
     ) {
+        let created_at = self.live_message_created_at();
         self.push_user_content_block_with_protocol_id(
             client_id.clone(),
             client_id.is_some(),
             None,
             chunk,
             indented,
+            created_at,
             cx,
         )
+    }
+
+    /// Like `push_user_content_block`, but with the time the message was
+    /// originally sent, for messages the agent replays from saved history.
+    pub fn push_user_content_block_at(
+        &mut self,
+        client_id: Option<ClientUserMessageId>,
+        chunk: acp::ContentBlock,
+        created_at: Option<DateTime<Utc>>,
+        cx: &mut Context<Self>,
+    ) {
+        self.push_user_content_block_with_protocol_id(
+            client_id.clone(),
+            client_id.is_some(),
+            None,
+            chunk,
+            false,
+            created_at,
+            cx,
+        )
+    }
+
+    /// Marks the thread as replaying saved history, so messages pushed without
+    /// an explicit time are not stamped with the current time.
+    pub fn set_replaying_history(&mut self, replaying: bool) {
+        self.replaying_history = replaying;
+    }
+
+    /// Sets the time of the next assistant message that starts a new entry.
+    /// Used when replaying saved history; live messages are stamped on arrival.
+    pub fn set_next_assistant_message_created_at(&mut self, created_at: Option<DateTime<Utc>>) {
+        self.pending_assistant_created_at = Some(created_at);
+    }
+
+    fn live_message_created_at(&self) -> Option<DateTime<Utc>> {
+        (!self.replaying_history).then(Utc::now)
     }
 
     fn push_user_content_block_from_agent(
@@ -2937,7 +2986,8 @@ impl AcpThread {
         chunk: acp::ContentBlock,
         cx: &mut Context<Self>,
     ) {
-        self.push_user_content_block_with_protocol_id(None, false, id, chunk, false, cx)
+        let created_at = self.live_message_created_at();
+        self.push_user_content_block_with_protocol_id(None, false, id, chunk, false, created_at, cx)
     }
 
     fn push_user_content_block_with_protocol_id(
@@ -2947,6 +2997,7 @@ impl AcpThread {
         protocol_id: Option<acp::MessageId>,
         chunk: acp::ContentBlock,
         indented: bool,
+        created_at: Option<DateTime<Utc>>,
         cx: &mut Context<Self>,
     ) {
         let language_registry = self.project.read(cx).languages().clone();
@@ -2993,6 +3044,7 @@ impl AcpThread {
                     chunks: vec![chunk],
                     checkpoint: None,
                     indented,
+                    created_at,
                 }),
                 cx,
             );
@@ -3048,6 +3100,7 @@ impl AcpThread {
                 chunks,
                 indented: existing_indented,
                 is_subagent_output: _,
+                created_at: _,
             }) = last_entry
             && *existing_indented == indented
         {
@@ -3103,11 +3156,16 @@ impl AcpThread {
                 }
             };
 
+            let created_at = self
+                .pending_assistant_created_at
+                .take()
+                .unwrap_or_else(|| self.live_message_created_at());
             self.push_entry(
                 AgentThreadEntry::AssistantMessage(AssistantMessage {
                     chunks: vec![chunk],
                     indented,
                     is_subagent_output: false,
+                    created_at,
                 }),
                 cx,
             );
@@ -3993,6 +4051,7 @@ impl AcpThread {
                             chunks: message,
                             checkpoint: None,
                             indented: false,
+                            created_at: Some(Utc::now()),
                         }),
                         cx,
                     );
@@ -5798,6 +5857,112 @@ mod tests {
         );
     }
 
+    fn message_created_at(thread: &AcpThread, ix: usize) -> Option<DateTime<Utc>> {
+        match &thread.entries[ix] {
+            AgentThreadEntry::UserMessage(message) => message.created_at,
+            AgentThreadEntry::AssistantMessage(message) => message.created_at,
+            _ => panic!("entry {ix} is not a message"),
+        }
+    }
+
+    #[gpui::test]
+    async fn test_live_messages_are_timestamped_once(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let connection = Rc::new(FakeAgentConnection::new());
+        let thread = cx
+            .update(|cx| {
+                connection.new_session(project, PathList::new(&[Path::new(path!("/test"))]), cx)
+            })
+            .await
+            .unwrap();
+
+        thread.update(cx, |thread, cx| {
+            thread.push_user_content_block(None, "Hello".into(), cx);
+            thread.push_assistant_content_block("First".into(), false, cx);
+        });
+        let (user_time, assistant_time) = thread.read_with(cx, |thread, _| {
+            (message_created_at(thread, 0), message_created_at(thread, 1))
+        });
+        assert!(user_time.is_some());
+        assert!(assistant_time.is_some());
+
+        // Later chunks of the same message keep the time the message started.
+        cx.background_executor.timer(Duration::from_millis(5)).await;
+        thread.update(cx, |thread, cx| {
+            thread.push_assistant_content_block(" more".into(), false, cx);
+        });
+        thread.read_with(cx, |thread, _| {
+            assert_eq!(thread.entries.len(), 2);
+            assert_eq!(message_created_at(thread, 1), assistant_time);
+        });
+    }
+
+    #[gpui::test]
+    async fn test_replayed_messages_keep_their_saved_time(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let connection = Rc::new(FakeAgentConnection::new());
+        let thread = cx
+            .update(|cx| {
+                connection.new_session(project, PathList::new(&[Path::new(path!("/test"))]), cx)
+            })
+            .await
+            .unwrap();
+
+        let saved_at = DateTime::<Utc>::from_timestamp(1_700_000_000, 0);
+        thread.update(cx, |thread, cx| {
+            thread.push_user_content_block_at(None, "saved".into(), saved_at, cx);
+            thread.set_next_assistant_message_created_at(saved_at);
+            thread.push_assistant_content_block("reply".into(), false, cx);
+            // History saved without a time stays without one, and a replayed
+            // message never picks up the current time.
+            thread.push_user_content_block_at(None, "old".into(), None, cx);
+            thread.set_next_assistant_message_created_at(None);
+            thread.push_assistant_content_block("old reply".into(), false, cx);
+        });
+        thread.read_with(cx, |thread, _| {
+            assert_eq!(message_created_at(thread, 0), saved_at);
+            assert_eq!(message_created_at(thread, 1), saved_at);
+            assert_eq!(message_created_at(thread, 2), None);
+            assert_eq!(message_created_at(thread, 3), None);
+        });
+    }
+
+    #[gpui::test]
+    async fn test_messages_pushed_while_replaying_history_are_not_stamped(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let connection = Rc::new(FakeAgentConnection::new());
+        let thread = cx
+            .update(|cx| {
+                connection.new_session(project, PathList::new(&[Path::new(path!("/test"))]), cx)
+            })
+            .await
+            .unwrap();
+
+        thread.update(cx, |thread, cx| {
+            thread.set_replaying_history(true);
+            thread.push_user_content_block(None, "history".into(), cx);
+            thread.push_assistant_content_block("history reply".into(), false, cx);
+            thread.set_replaying_history(false);
+            thread.push_user_content_block(None, "new".into(), cx);
+        });
+        thread.read_with(cx, |thread, _| {
+            assert_eq!(message_created_at(thread, 0), None);
+            assert_eq!(message_created_at(thread, 1), None);
+            assert!(message_created_at(thread, 2).is_some());
+        });
+    }
+
     #[gpui::test]
     async fn test_push_user_content_block(cx: &mut gpui::TestAppContext) {
         init_test(cx);
@@ -5997,6 +6162,7 @@ mod tests {
                 None,
                 "Typed prompt".into(),
                 false,
+                None,
                 cx,
             );
             thread
@@ -10449,6 +10615,7 @@ mod tests {
                     chunks: vec!["Injected message (no checkpoint)".into()],
                     checkpoint: None,
                     indented: false,
+                    created_at: None,
                 }),
                 cx,
             );
