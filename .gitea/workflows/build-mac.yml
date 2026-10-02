@@ -1,22 +1,42 @@
-# Builds an actual Zed.app (in a .dmg) on the mac runner and uploads it as an
-# artifact, using the project's own script/bundle-mac rather than a bare
-# `cargo build`. Runs on pushes to main and on demand only: a release build
-# (lto = "thin", codegen-units = 1) is far slower than the test job, and the
-# runner takes one job at a time, so this shouldn't run for every PR.
+# Builds the fork's macOS app (in a .dmg) on the mac runner with the project's
+# own script/bundle-mac, signs an update feed for it, and publishes both.
 #
-# Unsigned: script/bundle-mac only codesigns/notarizes for real when
+# Two channels:
+#   nightly - every push to main (or a manual run on main).
+#   stable  - a pushed tag `vX.Y.Z`, which must match the version in
+#             crates/zed/Cargo.toml.
+#
+# The app is built with ZED_UPDATE_FEED_URL and ZED_UPDATE_PUBLIC_KEY (see
+# crates/auto_update), so installed copies look for
+# https://zed.xetk.co.uk/<channel>/latest.json and only install a build whose
+# Ed25519 signature and SHA-256 check out. The private key is the Gitea secret
+# UPDATE_FEED_PRIVATE_KEY (a backup is kept off-box; losing it would leave every
+# installed copy unable to verify future updates).
+#
+# Publishing, from main and tags only: the build and its feed are attached to a
+# Gitea release (nightly: the rolling `nightly` tag; stable: the pushed tag) and
+# pushed to https://zed.xetk.co.uk with ci/update-server/publish.sh, over rsync
+# as the rrsync-restricted `zed-publish` account (secret ZED_PUBLISH_SSH_KEY;
+# the host is an nginx stack in xetk/stacks). A final step downloads what
+# clients will fetch and verifies it the way the app does.
+#
+# Unsigned for Apple: script/bundle-mac only codesigns/notarizes for real when
 # MACOS_CERTIFICATE/APPLE_NOTARIZATION_* secrets are set (none are, here), and
-# otherwise falls back to ad-hoc signing (`codesign --sign -`) on its own - no
-# workflow-level branching needed for that. Ad-hoc signing is enough to run the
-# app locally, but a copy downloaded on another Mac is quarantined by
-# Gatekeeper and needs `xattr -cr Zed.app` or a right-click "Open" the first
-# time, since it isn't notarized.
+# otherwise falls back to ad-hoc signing on its own. Ad-hoc signing is enough
+# to run the app locally, but a copy downloaded on another Mac is quarantined
+# by Gatekeeper and needs `xattr -cr "Zed xetk Nightly.app"` or a right-click
+# "Open" the first time, since it isn't notarized.
 name: build-mac
 
 on:
   push:
     branches: ["main"]
+    tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      channel:
+        description: "Channel to build: nightly or stable"
+        default: "nightly"
 
 concurrency:
   group: build-mac-${{ github.ref }}
@@ -25,6 +45,10 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
+  ZED_UPDATE_FEED_URL: https://zed.xetk.co.uk
+  ZED_UPDATE_PUBLIC_KEY: WABHotBi7Ov3Wz2nZvNqFKw8zcaHngvg6/pkKStrpKQ=
+  # LXC 100's SSH host key, pinned so the publish step never trusts on first use.
+  ZED_PUBLISH_HOST_KEY: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAbgc3sOwHj6TT6j1Rca+ZNTh9cisv6GqgiaYE/hMCTT"
 
 jobs:
   build:
@@ -35,6 +59,30 @@ jobs:
         uses: actions/checkout@v4
         with:
           clean: false
+
+      - name: Decide the channel and version
+        id: release
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            channel=stable
+          else
+            channel="${{ github.event.inputs.channel }}"
+            channel="${channel:-nightly}"
+          fi
+          case "${channel}" in
+            nightly|stable) ;;
+            *) echo "unsupported channel: ${channel}"; exit 1 ;;
+          esac
+
+          pkg_version=$(grep -m1 '^version = ' crates/zed/Cargo.toml | sed -E 's/^version = "(.*)"/\1/')
+          if [ "${{ github.ref_type }}" = "tag" ] && [ "${{ github.ref_name }}" != "v${pkg_version}" ]; then
+            echo "tag ${{ github.ref_name }} does not match the version in crates/zed/Cargo.toml (${pkg_version})"
+            exit 1
+          fi
+
+          echo "channel=${channel}" >> "$GITHUB_OUTPUT"
+          echo "pkg_version=${pkg_version}" >> "$GITHUB_OUTPUT"
+          echo "building ${channel} ${pkg_version}"
 
       - name: Use the pinned Rust toolchain via rustup
         # Same as test-mac.yml: the runner's default cargo doesn't match
@@ -72,6 +120,12 @@ jobs:
         # DMG-creation step look in the wrong place.
         run: ./script/clear-target-dir-if-larger-than 350 200
 
+      - name: Select the channel
+        # script/bundle-mac reads the channel from this file (and overrides
+        # $ZED_RELEASE_CHANNEL with it), so the checked-in `dev` is replaced
+        # for this run and restored at the end.
+        run: echo "${{ steps.release.outputs.channel }}" > crates/zed/RELEASE_CHANNEL
+
       - name: Build and bundle zed (release)
         run: ./script/bundle-mac
 
@@ -79,41 +133,140 @@ jobs:
         id: dmg
         run: |
           target_triple="$(rustc --version --verbose | grep host | cut -d' ' -f2)"
-          dmg_path=$(ls target/"${target_triple}"/release/Zed-*.dmg)
-          echo "path=${dmg_path}" >> "$GITHUB_OUTPUT"
-          ls -lh "${dmg_path}"
+          built=$(ls target/"${target_triple}"/release/Zed-*.dmg)
+          arch=$(uname -m)
+          if [ "${arch}" = "arm64" ]; then arch=aarch64; fi
+          name="Zed-xetk-${{ steps.release.outputs.channel }}-${{ github.run_number }}-${arch}.dmg"
+          cp "${built}" "target/${name}"
+          echo "path=target/${name}" >> "$GITHUB_OUTPUT"
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
+          echo "arch=${arch}" >> "$GITHUB_OUTPUT"
+          ls -lh "target/${name}"
 
-      - name: Upload Zed.app
+      - name: Sign the update feed
+        env:
+          UPDATE_FEED_PRIVATE_KEY: ${{ secrets.UPDATE_FEED_PRIVATE_KEY }}
+        run: |
+          channel="${{ steps.release.outputs.channel }}"
+          # Same shape the app builds for itself (release_channel::AppVersion):
+          # the nightly updater compares the commit sha at the end of it.
+          version="${{ steps.release.outputs.pkg_version }}+${channel}.${{ github.run_number }}.$(git rev-parse HEAD)"
+
+          cargo build --release -p update_feed
+          target/release/update_feed sign \
+            --channel "${channel}" \
+            --os macos \
+            --arch "${{ steps.dmg.outputs.arch }}" \
+            --version "${version}" \
+            --url "${ZED_UPDATE_FEED_URL}/${channel}/${{ steps.dmg.outputs.name }}" \
+            --file "${{ steps.dmg.outputs.path }}" \
+            --out latest.json
+
+          # Check what was just signed the way a client will.
+          target/release/update_feed verify \
+            --public-key "${ZED_UPDATE_PUBLIC_KEY}" \
+            --channel "${channel}" \
+            --os macos \
+            --arch "${{ steps.dmg.outputs.arch }}" \
+            --file "${{ steps.dmg.outputs.path }}" \
+            latest.json
+          cat latest.json
+
+      - name: Upload the build and its feed
         uses: actions/upload-artifact@v4
         with:
-          name: zed-macos
-          path: ${{ steps.dmg.outputs.path }}
+          name: zed-xetk-${{ steps.release.outputs.channel }}
+          path: |
+            ${{ steps.dmg.outputs.path }}
+            latest.json
           retention-days: 14
 
-      - name: Publish nightly release for the Homebrew tap
-        # Actions artifacts (above) need auth and expire after 14 days, so
-        # they're no good as a stable Homebrew Cask download URL. A release
-        # asset is public and permanent, so re-publish the same "nightly" tag
-        # each run - deleting the old release first makes this idempotent
-        # rather than accumulating a new release per push.
+      - name: Publish a Gitea release
+        # Only from main and tags: a manual run on another branch builds and
+        # signs (to test the pipeline) but must not replace the rolling nightly.
+        # Nightly re-publishes the same `nightly` tag every time, deleting the
+        # old release first so this is idempotent instead of piling up one
+        # release per push. Stable publishes the pushed tag.
+        if: github.ref == 'refs/heads/main' || github.ref_type == 'tag'
         env:
           GITEA_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           api="https://gitea.xetk.co.uk/api/v1/repos/xetk/zed"
-          dmg_path="${{ steps.dmg.outputs.path }}"
+          auth="Authorization: token ${GITEA_TOKEN}"
+          channel="${{ steps.release.outputs.channel }}"
+          sha=$(git rev-parse HEAD)
 
-          existing_id=$(curl -sf -H "Authorization: token ${GITEA_TOKEN}" "${api}/releases/tags/nightly" \
-            | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("id",""))' 2>/dev/null || true)
-          if [ -n "${existing_id}" ]; then
-            curl -sf -X DELETE -H "Authorization: token ${GITEA_TOKEN}" "${api}/releases/${existing_id}"
+          if [ "${channel}" = "nightly" ]; then
+            tag=nightly
+            title="Nightly build"
+            prerelease=true
+          else
+            tag="${{ github.ref_name }}"
+            title="${tag}"
+            prerelease=false
           fi
-          curl -s -X DELETE -H "Authorization: token ${GITEA_TOKEN}" "${api}/tags/nightly" >/dev/null || true
 
-          release=$(curl -sf -X POST -H "Authorization: token ${GITEA_TOKEN}" -H "Content-Type: application/json" \
-            -d "{\"tag_name\":\"nightly\",\"name\":\"Nightly build\",\"body\":\"Built from $(git rev-parse HEAD)\",\"prerelease\":true,\"target_commitish\":\"main\"}" \
-            "${api}/releases")
+          existing_id=$(curl -s -H "${auth}" "${api}/releases/tags/${tag}" \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin).get("id",""))' 2>/dev/null || true)
+          if [ -n "${existing_id}" ]; then
+            curl -sf -X DELETE -H "${auth}" "${api}/releases/${existing_id}"
+          fi
+          if [ "${channel}" = "nightly" ]; then
+            # The nightly tag has to move to this commit; a stable tag is what
+            # triggered this run and must stay put.
+            curl -s -X DELETE -H "${auth}" "${api}/tags/nightly" >/dev/null || true
+          fi
+
+          payload=$(python3 -c 'import json,sys; tag,title,sha,pre=sys.argv[1:5]; print(json.dumps({"tag_name":tag,"name":title,"body":"Built from "+sha,"prerelease":pre=="true","target_commitish":sha}))' \
+            "${tag}" "${title}" "${sha}" "${prerelease}")
+          release=$(curl -sf -X POST -H "${auth}" -H "Content-Type: application/json" -d "${payload}" "${api}/releases")
           release_id=$(echo "${release}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
 
-          curl -sf -X POST -H "Authorization: token ${GITEA_TOKEN}" \
-            -F "attachment=@${dmg_path};filename=Zed-Dev.dmg" \
-            "${api}/releases/${release_id}/assets?name=Zed-Dev.dmg"
+          name="${{ steps.dmg.outputs.name }}"
+          curl -sf -X POST -H "${auth}" -F "attachment=@${{ steps.dmg.outputs.path }};filename=${name}" \
+            "${api}/releases/${release_id}/assets?name=${name}"
+          curl -sf -X POST -H "${auth}" -F "attachment=@latest.json;filename=latest.json" \
+            "${api}/releases/${release_id}/assets?name=latest.json"
+
+      - name: Publish to zed.xetk.co.uk
+        if: github.ref == 'refs/heads/main' || github.ref_type == 'tag'
+        env:
+          ZED_PUBLISH_SSH_KEY: ${{ secrets.ZED_PUBLISH_SSH_KEY }}
+        run: |
+          ./ci/update-server/publish.sh \
+            "${{ steps.release.outputs.channel }}" \
+            "${{ steps.dmg.outputs.arch }}" \
+            "${{ steps.dmg.outputs.path }}" \
+            latest.json
+
+      - name: Verify what clients will fetch
+        if: github.ref == 'refs/heads/main' || github.ref_type == 'tag'
+        run: |
+          channel="${{ steps.release.outputs.channel }}"
+          arch="${{ steps.dmg.outputs.arch }}"
+          base="${ZED_UPDATE_FEED_URL}/${channel}"
+          scratch="$(mktemp -d)"
+          trap 'rm -rf "${scratch}"' EXIT
+
+          # The feed as served must be exactly the one just signed.
+          curl -fsSL -o "${scratch}/latest.json" "${base}/latest.json"
+          cmp latest.json "${scratch}/latest.json"
+
+          # Fetch the build the feed points at and check signature and hash
+          # the way the app will.
+          url=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["url"])' "${scratch}/latest.json")
+          curl -fsSL -o "${scratch}/build.dmg" "${url}"
+          target/release/update_feed verify \
+            --public-key "${ZED_UPDATE_PUBLIC_KEY}" \
+            --channel "${channel}" --os macos --arch "${arch}" \
+            --file "${scratch}/build.dmg" \
+            "${scratch}/latest.json"
+
+          # The alias brew will use must serve the same bytes.
+          curl -fsSL -o "${scratch}/alias.dmg" "${base}/Zed-xetk-${channel}-${arch}.dmg"
+          cmp "${scratch}/build.dmg" "${scratch}/alias.dmg"
+          echo "served ${channel} build verified"
+
+      - name: Restore the checked-in channel
+        if: always()
+        run: git checkout -- crates/zed/RELEASE_CHANNEL
