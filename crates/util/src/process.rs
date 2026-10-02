@@ -5,6 +5,13 @@ use std::process::Stdio;
 /// are killed when the process is terminated: on Unix by using process
 /// groups, and on Windows by using job objects.
 ///
+/// On Unix, dropping this struct kills the child's process group, plus (on
+/// macOS) any descendants that moved to a different group or session, and
+/// [`kill_all_process_groups`] does the same for every live child at once
+/// (e.g. when the app quits, when no `Drop` would otherwise run in time).
+/// Nothing can run when Zed is killed outright, so unlike on Windows a crash
+/// can still leave children running.
+///
 /// On Windows, dropping this struct closes the job object handle, which
 /// terminates all processes in the job. This also applies when the Zed
 /// process exits for any reason (including crashes), since the OS closes
@@ -13,6 +20,11 @@ pub struct Child {
     process: smol::process::Child,
     #[cfg(windows)]
     job: Option<windows_job::JobObject>,
+    // Declared after `process` so it runs after it when dropped. A separate
+    // guard (rather than `Drop for Child`) keeps `output(self)` able to move
+    // `process` out.
+    #[cfg(not(windows))]
+    _process_tree_guard: process_tree::Guard,
 }
 
 impl std::ops::Deref for Child {
@@ -50,7 +62,11 @@ impl Child {
                     crate::redact::redact_command(&format!("{command:?}"))
                 )
             })?;
-        Ok(Self { process })
+        let _process_tree_guard = process_tree::Guard::new(process.id());
+        Ok(Self {
+            process,
+            _process_tree_guard,
+        })
     }
 
     #[cfg(windows)]
@@ -113,10 +129,7 @@ impl Child {
 
     #[cfg(not(windows))]
     pub fn kill(&mut self) -> Result<()> {
-        let pid = self.process.id();
-        unsafe {
-            libc::killpg(pid as i32, libc::SIGKILL);
-        }
+        process_tree::kill_tree(self.process.id() as i32);
         Ok(())
     }
 
@@ -128,6 +141,132 @@ impl Child {
             self.process.kill()?;
             Ok(())
         }
+    }
+}
+
+/// Kills every process tree started through [`Child::spawn`] that hasn't been
+/// dropped yet. Meant to be called when the app is quitting. A no-op on
+/// Windows, where the job objects are closed by the OS when Zed exits.
+pub fn kill_all_process_groups() {
+    #[cfg(not(windows))]
+    process_tree::kill_all();
+}
+
+#[cfg(not(windows))]
+mod process_tree {
+    use std::sync::{Mutex, MutexGuard, PoisonError};
+
+    static LIVE_PROCESS_GROUPS: Mutex<Vec<i32>> = Mutex::new(Vec::new());
+
+    fn live_process_groups() -> MutexGuard<'static, Vec<i32>> {
+        LIVE_PROCESS_GROUPS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Registers a spawned child's process group, and kills its whole tree
+    /// when dropped.
+    pub(super) struct Guard {
+        pid: i32,
+    }
+
+    impl Guard {
+        pub(super) fn new(pid: u32) -> Self {
+            let pid = pid as i32;
+            live_process_groups().push(pid);
+            Self { pid }
+        }
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            live_process_groups().retain(|pid| *pid != self.pid);
+            kill_tree(self.pid);
+        }
+    }
+
+    pub(super) fn kill_all() {
+        let pids = live_process_groups().clone();
+        for pid in pids {
+            kill_tree(pid);
+        }
+    }
+
+    /// Kills the process group led by `pid`, and descendants of `pid` that left
+    /// the group (e.g. by calling `setsid`) where they can be found.
+    ///
+    /// Descendants are looked up first: once their parent dies they are
+    /// reparented to init and can no longer be traced back to it.
+    pub(super) fn kill_tree(pid: i32) {
+        // Only trust `pid` to still be our child while it exists; a leader
+        // that already exited has nothing left to walk from, and its pid may
+        // by now belong to something unrelated.
+        let leader_exists = unsafe { libc::kill(pid, 0) } == 0;
+        let descendants = if leader_exists {
+            descendant_pids(pid)
+        } else {
+            Vec::new()
+        };
+        for descendant in descendants {
+            unsafe {
+                libc::kill(descendant, libc::SIGKILL);
+            }
+        }
+        // Returns ESRCH, harmlessly, when the group is already empty.
+        unsafe {
+            libc::killpg(pid, libc::SIGKILL);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn child_pids(parent: i32) -> Vec<i32> {
+        const PROC_PPID_ONLY: u32 = 6;
+        let pid_size = size_of::<i32>();
+
+        // A null buffer asks for the size needed, in bytes.
+        let needed =
+            unsafe { libc::proc_listpids(PROC_PPID_ONLY, parent as u32, std::ptr::null_mut(), 0) };
+        if needed <= 0 {
+            return Vec::new();
+        }
+        // Children can be added between the two calls, so leave some slack.
+        let capacity = needed as usize / pid_size + 16;
+        let mut pids = vec![0i32; capacity];
+        let written = unsafe {
+            libc::proc_listpids(
+                PROC_PPID_ONLY,
+                parent as u32,
+                pids.as_mut_ptr().cast(),
+                (capacity * pid_size) as i32,
+            )
+        };
+        if written <= 0 {
+            return Vec::new();
+        }
+        pids.truncate(written as usize / pid_size);
+        pids.retain(|pid| *pid > 0);
+        pids
+    }
+
+    #[cfg(target_os = "macos")]
+    fn descendant_pids(root: i32) -> Vec<i32> {
+        let mut descendants = Vec::new();
+        let mut pending = vec![root];
+        while let Some(parent) = pending.pop() {
+            for child in child_pids(parent) {
+                if child != root && !descendants.contains(&child) {
+                    descendants.push(child);
+                    pending.push(child);
+                }
+            }
+        }
+        descendants
+    }
+
+    // Other platforms only get the process group kill.
+    #[cfg(not(target_os = "macos"))]
+    fn descendant_pids(_root: i32) -> Vec<i32> {
+        Vec::new()
     }
 }
 
@@ -291,6 +430,86 @@ mod windows_tests {
         assert_process_exits(
             grandchild_pid,
             "grandchild should be terminated after dropping the child",
+        );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use smol::io::{AsyncBufReadExt as _, BufReader};
+    use std::time::{Duration, Instant};
+
+    fn process_is_alive(pid: i32) -> bool {
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+
+    fn wait_until_dead(pid: i32) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            if !process_is_alive(pid) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        false
+    }
+
+    /// Spawns `script` under `sh` and returns the child plus the pid it prints
+    /// on its first line of stdout (the process the test cares about).
+    fn spawn_script(script: &str) -> (Child, i32) {
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", script]);
+        let mut child =
+            Child::spawn(command, Stdio::null(), Stdio::piped(), Stdio::null()).unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let mut line = String::new();
+        smol::block_on(BufReader::new(stdout).read_line(&mut line)).unwrap();
+        let pid = line.trim().parse().unwrap();
+        (child, pid)
+    }
+
+    #[test]
+    fn test_dropping_child_kills_background_process_in_its_group() {
+        let (child, grandchild) = spawn_script("sleep 300 & echo $!; wait");
+        assert!(process_is_alive(grandchild));
+
+        drop(child);
+
+        let killed = wait_until_dead(grandchild);
+        unsafe {
+            libc::kill(grandchild, libc::SIGKILL);
+        }
+        assert!(killed, "the background process should die with its parent");
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_dropping_child_kills_descendant_that_left_its_process_group() {
+        // `perl` makes itself a session leader, then becomes `sleep`, so the
+        // pid printed by the shell is a descendant in a different group.
+        let (child, grandchild) = spawn_script(
+            "perl -e 'use POSIX; POSIX::setsid(); exec q(sleep), q(300)' & echo $!; wait",
+        );
+        // Give perl a moment to call setsid before we check it escaped.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline
+            && unsafe { libc::getpgid(grandchild) } == unsafe { libc::getpgid(child.id() as i32) }
+        {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let escaped = unsafe { libc::getpgid(grandchild) } != child.id() as i32;
+
+        drop(child);
+
+        let killed = wait_until_dead(grandchild);
+        unsafe {
+            libc::kill(grandchild, libc::SIGKILL);
+        }
+        assert!(escaped, "the test process should have left the group");
+        assert!(
+            killed,
+            "a descendant that left the group should still be killed"
         );
     }
 }
