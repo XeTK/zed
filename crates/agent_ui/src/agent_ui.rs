@@ -1017,6 +1017,7 @@ mod tests {
             threads_sidebar_default_width: px(300.),
             threads_sidebar_auto_open: true,
             thinking_display: Default::default(),
+            message_timestamps: Default::default(),
         };
 
         cx.update(|cx| {

@@ -103,6 +103,21 @@ Your editor will jump to each file the agent touches.
 
 You can also hold `cmd`/`ctrl` when submitting a message to automatically follow.
 
+### Message Timestamps {#message-timestamps}
+
+Hover over a message in the thread to see the time it was sent; hover over that time to see the full date.
+Threads from the Zed agent keep these times when you reopen them. Threads saved before times were recorded, and history loaded from external agents, show none.
+
+To always show the time next to each message, set `agent.message_timestamps` to `"always"`:
+
+```json [settings]
+{
+  "agent": {
+    "message_timestamps": "always"
+  }
+}
+```
+
 ### Keeping the System Awake {#prevent-idle-sleep}
 
 While an agent thread is running, Zed asks the operating system not to idle-sleep, so long-running turns are not interrupted when you step away.
