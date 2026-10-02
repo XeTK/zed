@@ -1,0 +1,54 @@
+name: Sync upstream
+
+# Daily: merge zed-industries/zed `main` into a rolling bot branch and open/update
+# ONE pull request into `main` (ci/upstream-sync/sync_upstream.py has the full policy).
+#
+# This workflow NEVER merges. A maintainer merges the PR. On merge conflicts it pushes nothing and
+# opens/updates a single "Upstream sync blocked" issue instead.
+#
+# Runs daily because conflicts grow with the gap between syncs.
+#
+# Caveats worth knowing:
+#  * Gitea runs `schedule` workflows from the repository's DEFAULT branch
+#    (`main` here), so this file must be merged there for the cron to fire.
+#  * Pushing/PR-creation use SYNC_TOKEN if that secret is set, else the
+#    runner's GITHUB_TOKEN. Whether a PR opened with GITHUB_TOKEN triggers the
+#    build workflows is unverified; if it does not, set SYNC_TOKEN to a
+#    personal/bot token with repo write.
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Read-only: report what would happen, push/open nothing"
+        type: boolean
+        default: true
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Sync with zed-industries/zed
+    runs-on: macos
+    timeout-minutes: 20
+    steps:
+      - name: "Check out repository"
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # The same token is used for `git push` below.
+          token: ${{ secrets.SYNC_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: "Test the sync script"
+        run: python3 ci/upstream-sync/test_sync_upstream.py
+
+      - name: "Sync"
+        env:
+          GITEA_TOKEN: ${{ secrets.SYNC_TOKEN || secrets.GITHUB_TOKEN }}
+          GITEA_REPO: ${{ github.repository }}
+          DRY_RUN: ${{ github.event.inputs.dry_run == 'true' && '1' || '' }}
+        run: python3 ci/upstream-sync/sync_upstream.py
