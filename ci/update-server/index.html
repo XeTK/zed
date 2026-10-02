@@ -10,7 +10,7 @@
   h1 { margin: 0 0 .25rem; }
   .lede { color: var(--muted); margin-top: 0; }
   .channel { background: var(--card); border: 1px solid var(--line); border-radius: .75rem; padding: 1rem 1.25rem; margin: 1.25rem 0; }
-  .channel h2 { margin: 0 0 .25rem; font-size: 1.1rem; }
+  .channel h3 { margin: 0 0 .25rem; font-size: 1.1rem; }
   .meta { color: var(--muted); font-size: .9rem; word-break: break-all; }
   a.button { display: inline-block; margin-top: .6rem; padding: .45rem .9rem; border-radius: .5rem; background: var(--accent); color: #fff; text-decoration: none; font-weight: 600; }
   code, pre { font: .9em ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--card); border-radius: .35rem; }
@@ -22,41 +22,75 @@
 <h1>Zed xetk</h1>
 <p class="lede">A personal build of the <a href="https://zed.dev">Zed</a> editor with a few extra features. Not affiliated with or supported by Zed Industries.</p>
 
-<div class="channel" id="nightly"><h2>Nightly</h2><p class="meta">Every change to main. Loading...</p></div>
-<div class="channel" id="stable"><h2>Stable</h2><p class="meta">Tagged releases. Loading...</p></div>
+<div id="platforms"></div>
 
 <h2>Installing</h2>
-<p>Apple silicon Macs only. Builds are not notarized, so the first launch needs a right-click and <b>Open</b>, or:</p>
+<p>Builds are not notarized. On macOS the first launch needs a right-click and <b>Open</b>, or:</p>
 <pre>xattr -cr "/Applications/Zed xetk Nightly.app"</pre>
 <p>Once installed, the app checks this site for updates and installs a build only if its signature and checksum match.</p>
 <p>It shares its settings and history with a regular Zed install on the same Mac, so avoid running both at once.</p>
 
 <script>
-  function describe(id, label) {
-    const box = document.getElementById(id);
-    fetch(id + "/latest.json", { cache: "no-store" })
+  const channels = [
+    { id: "nightly", label: "Nightly", about: "Every change to main." },
+    { id: "stable", label: "Stable", about: "Tagged releases." },
+  ];
+  // Add a platform here once its builds are published to <channel>/<id>/.
+  const platforms = [
+    { id: "macos-aarch64", label: "macOS (Apple silicon)", os: "Mac" },
+    { id: "linux-x86_64", label: "Linux (x86_64)", os: "Linux" },
+    { id: "windows-x86_64", label: "Windows (x86_64)", os: "Win" },
+  ];
+
+  function element(tag, className, text) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  }
+
+  function describe(platform, channel) {
+    return fetch(channel.id + "/" + platform.id + "/latest.json", { cache: "no-store" })
       .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })
       .then(feed => {
         const sha = (feed.version.split(".").pop() || "").slice(0, 7);
         const base = feed.version.split("+")[0];
-        box.innerHTML = "";
-        const h = document.createElement("h2"); h.textContent = label; box.appendChild(h);
-        const m = document.createElement("p"); m.className = "meta";
-        m.textContent = base + (sha ? " (" + sha + ")" : "") + " - " + feed.os + "/" + feed.arch;
-        box.appendChild(m);
-        const s = document.createElement("p"); s.className = "meta";
-        s.textContent = "sha256 " + feed.sha256;
-        box.appendChild(s);
-        const a = document.createElement("a"); a.className = "button"; a.href = feed.url; a.textContent = "Download";
-        box.appendChild(a);
+        const box = element("div", "channel");
+        box.appendChild(element("h3", "", channel.label));
+        box.appendChild(element("p", "meta", channel.about + " " + base + (sha ? " (" + sha + ")" : "")));
+        box.appendChild(element("p", "meta", "sha256 " + feed.sha256));
+        const link = element("a", "button", "Download");
+        link.href = feed.url;
+        box.appendChild(link);
+        return box;
       })
-      .catch(() => {
-        const m = box.querySelector(".meta");
-        if (m) m.textContent = "Nothing published yet.";
-      });
+      .catch(() => null);
   }
-  describe("nightly", "Nightly");
-  describe("stable", "Stable");
+
+  const isVisitor = platform => navigator.userAgent.includes(platform.os);
+  const visitorFirst = (a, b) => isVisitor(b) - isVisitor(a);
+  const ordered = platforms.slice().sort(visitorFirst);
+  Promise.all(ordered.map(platform =>
+    Promise.all(channels.map(channel => describe(platform, channel)))
+  )).then(results => {
+    const container = document.getElementById("platforms");
+    results.forEach((boxes, index) => {
+      const platform = ordered[index];
+      const published = boxes.filter(box => box);
+      if (published.length === 0) return;
+      const section = element("section", "platform");
+      section.id = platform.id;
+      section.appendChild(element("h2", "", platform.label));
+      if (isVisitor(platform)) {
+        section.appendChild(element("p", "meta", "This looks like your platform."));
+      }
+      published.forEach(box => section.appendChild(box));
+      container.appendChild(section);
+    });
+    if (!container.firstChild) {
+      container.appendChild(element("p", "meta", "Nothing published yet."));
+    }
+  });
 </script>
 </body>
 </html>
