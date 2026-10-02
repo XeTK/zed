@@ -1363,6 +1363,13 @@
     //
     // Default: auto
     "thinking_display": "auto",
+    // When to show the time each message was sent in the agent panel.
+    // May be one of:
+    //  - "on_hover": show the time only while hovering over a message
+    //  - "always": always show the time next to each message
+    //
+    // Default: on_hover
+    "message_timestamps": "on_hover",
     // Whether clicking the stop button on a running terminal tool should also cancel the agent's generation.
     // Note that this only applies to the stop button, not to ctrl+c inside the terminal.
     //
