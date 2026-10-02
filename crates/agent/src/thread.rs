@@ -288,6 +288,10 @@ impl Message {
 pub struct UserMessage {
     pub id: ClientUserMessageId,
     pub content: Arc<[UserMessageContent]>,
+    /// When the message was sent. Absent for threads saved before this was
+    /// recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -607,6 +611,13 @@ fn codeblock_tag(full_path: &Path, line_range: Option<&RangeInclusive<u32>>) -> 
 }
 
 impl AgentMessage {
+    fn started_now() -> Self {
+        Self {
+            created_at: Some(Utc::now()),
+            ..Self::default()
+        }
+    }
+
     pub fn to_markdown(&self) -> String {
         let mut markdown = String::new();
 
@@ -745,6 +756,10 @@ pub struct AgentMessage {
     pub(crate) content: Vec<AgentMessageContent>,
     pub(crate) tool_results: IndexMap<LanguageModelToolUseId, LanguageModelToolResult>,
     pub(crate) reasoning_details: Option<Arc<serde_json::Value>>,
+    /// When the first part of the message arrived. Absent for threads saved
+    /// before this was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) created_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -894,6 +909,11 @@ pub struct AvailableModel {
 #[derive(Debug)]
 pub enum ThreadEvent {
     UserMessage(UserMessage),
+    /// Sent when replaying saved history, before the content of each agent
+    /// message, so it keeps the time it was originally received.
+    AgentMessageStart {
+        created_at: Option<DateTime<Utc>>,
+    },
     AgentText(String),
     AgentThinking(String),
     ToolCall(acp::ToolCall),
@@ -1542,6 +1562,7 @@ impl Thread {
             match &**message {
                 Message::User(user_message) => stream.send_user_message(user_message),
                 Message::Agent(assistant_message) => {
+                    stream.send_agent_message_start(assistant_message.created_at);
                     for content in &assistant_message.content {
                         match content {
                             AgentMessageContent::Text(text) => stream.send_text(text),
@@ -2549,8 +2570,11 @@ impl Thread {
         let content = content.into_iter().map(Into::into).collect::<Arc<_>>();
         log::debug!("Thread::send content: {:?}", content);
 
-        self.messages
-            .push(Arc::new(Message::User(UserMessage { id, content })));
+        self.messages.push(Arc::new(Message::User(UserMessage {
+            id,
+            content,
+            created_at: Some(Utc::now()),
+        })));
         cx.notify();
 
         self.send_existing(cx)
@@ -2676,8 +2700,11 @@ impl Thread {
             .into_iter()
             .map(|block| UserMessageContent::from_content_block(block, path_style))
             .collect::<Arc<_>>();
-        self.messages
-            .push(Arc::new(Message::User(UserMessage { id, content })));
+        self.messages.push(Arc::new(Message::User(UserMessage {
+            id,
+            content,
+            created_at: Some(Utc::now()),
+        })));
         cx.notify();
     }
 
@@ -2697,6 +2724,7 @@ impl Thread {
 
         self.messages.push(Arc::new(Message::Agent(AgentMessage {
             content: vec![AgentMessageContent::Text(text)],
+            created_at: Some(Utc::now()),
             ..Default::default()
         })));
         cx.notify();
@@ -3288,6 +3316,7 @@ impl Thread {
                         this.messages.push(Arc::new(Message::User(UserMessage {
                             id: marker_id,
                             content: Arc::from([]),
+                            created_at: Some(Utc::now()),
                         })));
                         this.messages.push(compaction);
                     }
@@ -3402,7 +3431,7 @@ impl Thread {
         match event {
             StartMessage { .. } => {
                 self.flush_pending_message(cx);
-                self.pending_message = Some(AgentMessage::default());
+                self.pending_message = Some(AgentMessage::started_now());
             }
             Text(new_text) => self.handle_text_event(new_text, event_stream),
             Thinking { text, signature } => {
@@ -4030,7 +4059,8 @@ impl Thread {
     }
 
     fn pending_message(&mut self) -> &mut AgentMessage {
-        self.pending_message.get_or_insert_default()
+        self.pending_message
+            .get_or_insert_with(AgentMessage::started_now)
     }
 
     fn flush_pending_message(&mut self, cx: &mut Context<Self>) {
@@ -5386,6 +5416,12 @@ impl ThreadEventStream {
     fn send_user_message(&self, message: &UserMessage) {
         self.sender
             .unbounded_send(Ok(ThreadEvent::UserMessage(message.clone())))
+            .ok();
+    }
+
+    fn send_agent_message_start(&self, created_at: Option<DateTime<Utc>>) {
+        self.sender
+            .unbounded_send(Ok(ThreadEvent::AgentMessageStart { created_at }))
             .ok();
     }
 
@@ -7063,6 +7099,7 @@ mod tests {
         Arc::new(Message::User(UserMessage {
             id,
             content: vec![UserMessageContent::Text(text.to_string())].into(),
+            created_at: None,
         }))
     }
 
@@ -7712,7 +7749,7 @@ mod tests {
                 assert!(matches!(&*thread.messages[1], Message::Agent(_)));
                 assert!(matches!(
                     &*thread.messages[2],
-                    Message::User(UserMessage { id, content }) if id == &compact_message_id && content.is_empty()
+                    Message::User(UserMessage { id, content, .. }) if id == &compact_message_id && content.is_empty()
                 ));
                 assert!(matches!(
                     &*thread.messages[3],
@@ -7862,13 +7899,15 @@ mod tests {
                 thread.messages.push(Arc::new(Message::User(UserMessage {
                     id: marker_id.clone(),
                     content: Arc::from([]),
+                    created_at: None,
                 })));
                 thread.messages.push(summary_compaction("summary"));
                 thread.replay(cx)
             })
         });
 
-        // Skip the leading "before"/"answer" replay events.
+        // Skip the leading "before" message and the "answer" start and text events.
+        let _ = replay_events.next().await;
         let _ = replay_events.next().await;
         let _ = replay_events.next().await;
 
@@ -7889,6 +7928,77 @@ mod tests {
             matches!(&event, Some(Ok(ThreadEvent::ContextCompaction(_)))),
             "expected the compaction to replay after the marker, got {event:?}"
         );
+    }
+
+    #[gpui::test]
+    async fn test_replay_carries_the_saved_message_times(cx: &mut TestAppContext) {
+        let (thread, _event_stream) = setup_thread_for_test(cx).await;
+        let saved_at = DateTime::<Utc>::from_timestamp(1_700_000_000, 0);
+
+        let mut replay_events = cx.update(|cx| {
+            thread.update(cx, |thread, cx| {
+                thread.messages.push(Arc::new(Message::User(UserMessage {
+                    id: ClientUserMessageId::new(),
+                    content: vec![UserMessageContent::Text("question".into())].into(),
+                    created_at: saved_at,
+                })));
+                thread.messages.push(Arc::new(Message::Agent(AgentMessage {
+                    content: vec![AgentMessageContent::Text("answer".into())],
+                    created_at: saved_at,
+                    ..Default::default()
+                })));
+                // A message saved before times were recorded replays without one.
+                thread.messages.push(agent_text_message("old answer"));
+                thread.replay(cx)
+            })
+        });
+
+        match replay_events.next().await {
+            Some(Ok(ThreadEvent::UserMessage(message))) => assert_eq!(message.created_at, saved_at),
+            event => panic!("expected the user message, got {event:?}"),
+        }
+        match replay_events.next().await {
+            Some(Ok(ThreadEvent::AgentMessageStart { created_at })) => {
+                assert_eq!(created_at, saved_at)
+            }
+            event => panic!("expected the agent message start, got {event:?}"),
+        }
+        let _text = replay_events.next().await;
+        match replay_events.next().await {
+            Some(Ok(ThreadEvent::AgentMessageStart { created_at })) => {
+                assert_eq!(created_at, None)
+            }
+            event => panic!("expected the old agent message start, got {event:?}"),
+        }
+    }
+
+    #[test]
+    fn test_message_time_is_optional_in_saved_threads() {
+        let saved_at = DateTime::<Utc>::from_timestamp(1_700_000_000, 0);
+        let message = Message::Agent(AgentMessage {
+            content: vec![AgentMessageContent::Text("hi".into())],
+            created_at: saved_at,
+            ..Default::default()
+        });
+        let json = serde_json::to_value(&message).unwrap();
+        assert!(json["Agent"]["created_at"].is_string());
+        assert_eq!(serde_json::from_value::<Message>(json).unwrap(), message);
+
+        // Threads saved before times were recorded have no such key.
+        let mut json = serde_json::to_value(&message).unwrap();
+        json["Agent"].as_object_mut().unwrap().remove("created_at");
+        let Message::Agent(restored) = serde_json::from_value::<Message>(json).unwrap() else {
+            panic!("expected an agent message");
+        };
+        assert_eq!(restored.created_at, None);
+
+        let unstamped = Message::User(UserMessage {
+            id: ClientUserMessageId::new(),
+            content: Arc::from([]),
+            created_at: None,
+        });
+        let json = serde_json::to_value(&unstamped).unwrap();
+        assert!(json["User"].get("created_at").is_none());
     }
 
     /// When `agent.compaction_model` is configured, manual `/compact` streams
@@ -8209,6 +8319,12 @@ mod tests {
                     if update.id == compaction_id && update.summary_delta == "summary"
             ),
             "expected context compaction summary event, got {event:?}"
+        );
+
+        let event = replay_events.next().await;
+        assert!(
+            matches!(&event, Some(Ok(ThreadEvent::AgentMessageStart { .. }))),
+            "expected replayed agent message start, got {event:?}"
         );
 
         let event = replay_events.next().await;
@@ -8911,6 +9027,7 @@ mod tests {
                     ],
                     tool_results,
                     reasoning_details: None,
+                    created_at: None,
                 })));
 
                 thread.replay(cx)

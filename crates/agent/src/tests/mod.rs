@@ -4561,14 +4561,20 @@ async fn test_send_retry_finishes_tool_calls_on_error(cx: &mut TestAppContext) {
     cx.run_until_parked();
     events.collect::<Vec<_>>().await;
     thread.read_with(cx, |thread, _cx| {
+        let last_message = thread.last_received_or_pending_message();
+        let Some(Message::Agent(last_message)) = last_message.as_deref() else {
+            panic!("expected an agent message");
+        };
         assert_eq!(
-            thread.last_received_or_pending_message().as_deref(),
-            Some(&Message::Agent(AgentMessage {
+            last_message,
+            &AgentMessage {
                 content: vec![AgentMessageContent::Text("Done".into())],
                 tool_results: IndexMap::default(),
                 reasoning_details: None,
-            }))
+                created_at: last_message.created_at,
+            }
         );
+        assert!(last_message.created_at.is_some());
     })
 }
 

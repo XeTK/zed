@@ -2290,12 +2290,18 @@ impl NativeAgentConnection {
                             ThreadEvent::UserMessage(message) => {
                                 acp_thread.update(cx, |thread, cx| {
                                     for content in &*message.content {
-                                        thread.push_user_content_block(
+                                        thread.push_user_content_block_at(
                                             Some(message.id.clone()),
                                             content.clone().into(),
+                                            message.created_at,
                                             cx,
                                         );
                                     }
+                                })?;
+                            }
+                            ThreadEvent::AgentMessageStart { created_at } => {
+                                acp_thread.update(cx, |thread, _| {
+                                    thread.set_next_assistant_message_created_at(created_at)
                                 })?;
                             }
                             ThreadEvent::AgentText(text) => {
