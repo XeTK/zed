@@ -13,9 +13,12 @@
 # UPDATE_FEED_PRIVATE_KEY (a backup is kept off-box; losing it would leave every
 # installed copy unable to verify future updates).
 #
-# This workflow's artifacts are published as a Gitea release (nightly: the
-# rolling `nightly` tag; stable: the pushed tag). Getting them onto the public
-# host is a separate pull, see ci/update-server/.
+# Publishing, from main and tags only: the build and its feed are attached to a
+# Gitea release (nightly: the rolling `nightly` tag; stable: the pushed tag) and
+# pushed to https://zed.xetk.co.uk with ci/update-server/publish.sh, over rsync
+# as the rrsync-restricted `zed-publish` account (secret ZED_PUBLISH_SSH_KEY;
+# the host is an nginx stack in xetk/stacks). A final step downloads what
+# clients will fetch and verifies it the way the app does.
 #
 # Unsigned for Apple: script/bundle-mac only codesigns/notarizes for real when
 # MACOS_CERTIFICATE/APPLE_NOTARIZATION_* secrets are set (none are, here), and
@@ -44,6 +47,8 @@ env:
   CARGO_INCREMENTAL: "0"
   ZED_UPDATE_FEED_URL: https://zed.xetk.co.uk
   ZED_UPDATE_PUBLIC_KEY: WABHotBi7Ov3Wz2nZvNqFKw8zcaHngvg6/pkKStrpKQ=
+  # LXC 100's SSH host key, pinned so the publish step never trusts on first use.
+  ZED_PUBLISH_HOST_KEY: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAbgc3sOwHj6TT6j1Rca+ZNTh9cisv6GqgiaYE/hMCTT"
 
 jobs:
   build:
@@ -222,6 +227,45 @@ jobs:
             "${api}/releases/${release_id}/assets?name=${name}"
           curl -sf -X POST -H "${auth}" -F "attachment=@latest.json;filename=latest.json" \
             "${api}/releases/${release_id}/assets?name=latest.json"
+
+      - name: Publish to zed.xetk.co.uk
+        if: github.ref == 'refs/heads/main' || github.ref_type == 'tag'
+        env:
+          ZED_PUBLISH_SSH_KEY: ${{ secrets.ZED_PUBLISH_SSH_KEY }}
+        run: |
+          ./ci/update-server/publish.sh \
+            "${{ steps.release.outputs.channel }}" \
+            "${{ steps.dmg.outputs.arch }}" \
+            "${{ steps.dmg.outputs.path }}" \
+            latest.json
+
+      - name: Verify what clients will fetch
+        if: github.ref == 'refs/heads/main' || github.ref_type == 'tag'
+        run: |
+          channel="${{ steps.release.outputs.channel }}"
+          arch="${{ steps.dmg.outputs.arch }}"
+          base="${ZED_UPDATE_FEED_URL}/${channel}"
+          scratch="$(mktemp -d)"
+          trap 'rm -rf "${scratch}"' EXIT
+
+          # The feed as served must be exactly the one just signed.
+          curl -fsSL -o "${scratch}/latest.json" "${base}/latest.json"
+          cmp latest.json "${scratch}/latest.json"
+
+          # Fetch the build the feed points at and check signature and hash
+          # the way the app will.
+          url=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["url"])' "${scratch}/latest.json")
+          curl -fsSL -o "${scratch}/build.dmg" "${url}"
+          target/release/update_feed verify \
+            --public-key "${ZED_UPDATE_PUBLIC_KEY}" \
+            --channel "${channel}" --os macos --arch "${arch}" \
+            --file "${scratch}/build.dmg" \
+            "${scratch}/latest.json"
+
+          # The alias brew will use must serve the same bytes.
+          curl -fsSL -o "${scratch}/alias.dmg" "${base}/Zed-xetk-${channel}-${arch}.dmg"
+          cmp "${scratch}/build.dmg" "${scratch}/alias.dmg"
+          echo "served ${channel} build verified"
 
       - name: Restore the checked-in channel
         if: always()
