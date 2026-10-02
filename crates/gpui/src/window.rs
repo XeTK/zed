@@ -486,7 +486,43 @@ impl ArenaClearNeeded {
     }
 }
 
-pub(crate) type FocusMap = RwLock<SlotMap<FocusId, FocusRef>>;
+/// Backs the set of live focus handles for an app. `pending_releases` lets
+/// `App::release_dropped_focus_handles` skip scanning `slots` when no handle
+/// has actually reached a zero ref count since the last check, since that scan
+/// would otherwise run unconditionally on every `flush_effects` iteration.
+pub(crate) struct FocusMap {
+    pending_releases: AtomicUsize,
+    slots: RwLock<SlotMap<FocusId, FocusRef>>,
+}
+
+impl FocusMap {
+    pub(crate) fn read(&self) -> parking_lot::RwLockReadGuard<'_, SlotMap<FocusId, FocusRef>> {
+        self.slots.read()
+    }
+
+    pub(crate) fn write(&self) -> parking_lot::RwLockWriteGuard<'_, SlotMap<FocusId, FocusRef>> {
+        self.slots.write()
+    }
+
+    fn mark_pending_release(&self) {
+        self.pending_releases.fetch_add(1, SeqCst);
+    }
+
+    /// Returns whether any handle was released since the last call, resetting the count.
+    pub(crate) fn take_pending_releases(&self) -> bool {
+        self.pending_releases.swap(0, SeqCst) > 0
+    }
+}
+
+impl Default for FocusMap {
+    fn default() -> Self {
+        Self {
+            pending_releases: AtomicUsize::new(0),
+            slots: RwLock::new(SlotMap::with_key()),
+        }
+    }
+}
+
 pub(crate) struct FocusRef {
     pub(crate) ref_count: AtomicUsize,
     pub(crate) tab_index: isize,
@@ -652,12 +688,16 @@ impl Eq for FocusHandle {}
 
 impl Drop for FocusHandle {
     fn drop(&mut self) {
-        self.handles
+        let prev_ref_count = self
+            .handles
             .read()
             .get(self.id)
             .unwrap()
             .ref_count
             .fetch_sub(1, SeqCst);
+        if prev_ref_count == 1 {
+            self.handles.mark_pending_release();
+        }
     }
 }
 
