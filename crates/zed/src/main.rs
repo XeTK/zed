@@ -655,6 +655,13 @@ fn main() {
         AppState::set_global(app_state.clone(), cx);
 
         watcher_debug::init(app_state.clone(), cx);
+        // Context servers and agents run in their own process groups, so
+        // nothing stops them when Zed exits unless we do it here.
+        cx.on_app_quit(|_| {
+            util::process::kill_all_process_groups();
+            async {}
+        })
+        .detach();
         auto_update::init(client.clone(), cx);
         dap_adapters::init(cx);
         auto_update_ui::init(cx);
