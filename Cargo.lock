@@ -1396,6 +1396,7 @@ dependencies = [
  "settings",
  "smol",
  "tempfile",
+ "update_feed",
  "util",
  "which",
  "workspace",

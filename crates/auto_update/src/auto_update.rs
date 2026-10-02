@@ -264,6 +264,38 @@ struct GlobalAutoUpdate(Option<Entity<AutoUpdater>>);
 
 impl Global for GlobalAutoUpdate {}
 
+/// Where to fetch signed update feeds from, and the key they must be signed
+/// with. When set, updates come from `{base_url}/{channel}/latest.json` and are
+/// only installed if the feed's signature and the download's hash check out,
+/// instead of asking zed.dev's release API (which has no signatures).
+#[derive(Clone, Debug)]
+struct FeedConfig {
+    base_url: String,
+    /// Base64 Ed25519 public key.
+    public_key: String,
+}
+
+impl FeedConfig {
+    /// Both values are baked in when the app is built (`ZED_UPDATE_FEED_URL`
+    /// and `ZED_UPDATE_PUBLIC_KEY`); builds that set neither keep using
+    /// zed.dev. The URL alone can also be overridden at runtime, which can't
+    /// weaken anything: the signature is still checked against the built-in key.
+    fn from_build() -> Option<Self> {
+        let public_key = option_env!("ZED_UPDATE_PUBLIC_KEY")?.trim();
+        let base_url = env::var("ZED_UPDATE_FEED_URL")
+            .ok()
+            .or_else(|| option_env!("ZED_UPDATE_FEED_URL").map(ToOwned::to_owned))?;
+        (!public_key.is_empty() && !base_url.trim().is_empty()).then(|| Self {
+            base_url: base_url.trim().to_owned(),
+            public_key: public_key.to_owned(),
+        })
+    }
+}
+
+struct GlobalFeedConfig(Option<FeedConfig>);
+
+impl Global for GlobalFeedConfig {}
+
 pub fn init(client: Arc<Client>, cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _window, _cx| {
         workspace.register_action(|_, action, window, cx| check(action, window, cx));
@@ -273,6 +305,10 @@ pub fn init(client: Arc<Client>, cx: &mut App) {
         });
     })
     .detach();
+
+    if !cx.has_global::<GlobalFeedConfig>() {
+        cx.set_global(GlobalFeedConfig(FeedConfig::from_build()));
+    }
 
     let version = release_channel::AppVersion::global(cx);
     let auto_updater = cx.new(|cx| {
@@ -737,6 +773,44 @@ impl AutoUpdater {
         })
     }
 
+    /// Fetches this channel's `latest.json` and returns it only if it is
+    /// signed with the configured key and is for this platform.
+    async fn get_signed_feed(
+        this: &Entity<Self>,
+        release_channel: ReleaseChannel,
+        config: &FeedConfig,
+        cx: &mut AsyncApp,
+    ) -> Result<update_feed::Feed> {
+        let http_client = this.read_with(cx, |this, _| this.client.http_client());
+        let url = format!(
+            "{}/{}/latest.json",
+            config.base_url.trim_end_matches('/'),
+            release_channel.dev_name()
+        );
+
+        let mut response = http_client
+            .get(url.as_str(), Default::default(), true)
+            .await?;
+        let mut body = Vec::new();
+        response.body_mut().read_to_end(&mut body).await?;
+        anyhow::ensure!(
+            response.status().is_success(),
+            "failed to fetch update feed {url}: {}",
+            response.status()
+        );
+
+        update_feed::parse_and_verify(
+            &body,
+            &config.public_key,
+            update_feed::Expected {
+                channel: release_channel.dev_name(),
+                os: OS,
+                arch: ARCH,
+            },
+        )
+        .with_context(|| format!("rejected update feed from {url}"))
+    }
+
     async fn update(this: Entity<Self>, cx: &mut AsyncApp) -> Result<()> {
         let (client, installed_version, previous_status, release_channel) =
             this.read_with(cx, |this, cx| {
@@ -756,8 +830,24 @@ impl AutoUpdater {
             cx.notify();
         });
 
-        let fetched_release_data =
-            Self::get_release_asset(&this, release_channel, None, "zed", OS, ARCH, cx).await?;
+        let feed_config = cx.update(|cx| {
+            cx.try_global::<GlobalFeedConfig>()
+                .and_then(|config| config.0.clone())
+        });
+        let (fetched_release_data, signed_feed) = match feed_config {
+            Some(config) => {
+                let feed = Self::get_signed_feed(&this, release_channel, &config, cx).await?;
+                let release = ReleaseAsset {
+                    version: feed.version.clone(),
+                    url: feed.url.clone(),
+                };
+                (release, Some(feed))
+            }
+            None => (
+                Self::get_release_asset(&this, release_channel, None, "zed", OS, ARCH, cx).await?,
+                None,
+            ),
+        };
         let fetched_version = fetched_release_data.clone().version;
         let app_commit_sha = Ok(cx.update(|cx| AppCommitSha::try_global(cx).map(|sha| sha.full())));
         let newer_version = Self::check_if_fetched_version_is_newer(
@@ -817,6 +907,13 @@ impl AutoUpdater {
         )
         .await
         .with_context(|| format!("Failed to download update to {}", target_path.display()))?;
+
+        if let Some(feed) = signed_feed {
+            let downloaded = target_path.clone();
+            cx.background_spawn(async move { update_feed::verify_file(&feed, &downloaded) })
+                .await
+                .context("The downloaded update does not match its signed feed")?;
+        }
 
         this.update(cx, |this, cx| {
             this.status = AutoUpdateStatus::Installing {
@@ -1508,6 +1605,201 @@ mod tests {
         let path = path.unwrap();
         assert_eq!(path, tmp_dir.path().join("zed"));
         assert_eq!(std::fs::read_to_string(path).unwrap(), "<fake-zed-update>");
+    }
+
+    /// Everything a signed-feed test observes about what the app did.
+    #[derive(Default)]
+    struct FeedTestObservations {
+        feed_requested: AtomicBool,
+        download_requested: AtomicBool,
+        installed: AtomicBool,
+    }
+
+    fn signed_feed_json(
+        keypair: &update_feed::Keypair,
+        channel: &str,
+        version: &str,
+        signed_for: &str,
+    ) -> String {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("build");
+        std::fs::write(&path, signed_for).unwrap();
+        let feed = update_feed::sign(
+            &keypair.private_key,
+            update_feed::Unsigned {
+                channel: channel.into(),
+                os: OS.into(),
+                arch: ARCH.into(),
+                version: version.into(),
+                url: "https://updates.test/Zed.dmg".into(),
+                sha256: update_feed::sha256_hex_of_file(&path).unwrap(),
+            },
+        )
+        .unwrap();
+        serde_json::to_string(&feed).unwrap()
+    }
+
+    /// Starts an updater on a stable 0.100.0 build that updates from a signed
+    /// feed, with `public_key` as the key it trusts.
+    fn start_updater_with_feed(
+        public_key: &str,
+        feed_json: String,
+        served_download: &'static str,
+        observations: &Arc<FeedTestObservations>,
+        cx: &mut TestAppContext,
+    ) -> Entity<AutoUpdater> {
+        cx.update(|cx| {
+            settings::init(cx);
+            release_channel::init_test(Version::new(0, 100, 0), ReleaseChannel::Stable, cx);
+            cx.set_global(GlobalFeedConfig(Some(FeedConfig {
+                base_url: "https://updates.test/".into(),
+                public_key: public_key.into(),
+            })));
+            let installed = observations.clone();
+            cx.set_global(InstallOverride(Rc::new(move |_, _| {
+                installed.installed.store(true, atomic::Ordering::SeqCst);
+                Ok(None)
+            })));
+
+            let observations = observations.clone();
+            let http_client = FakeHttpClient::create(move |request| {
+                let observations = observations.clone();
+                let feed_json = feed_json.clone();
+                async move {
+                    let response = match request.uri().path() {
+                        "/stable/latest.json" => {
+                            observations
+                                .feed_requested
+                                .store(true, atomic::Ordering::SeqCst);
+                            Response::builder().status(200).body(feed_json.into())
+                        }
+                        "/Zed.dmg" => {
+                            observations
+                                .download_requested
+                                .store(true, atomic::Ordering::SeqCst);
+                            Response::builder().status(200).body(served_download.into())
+                        }
+                        _ => Response::builder().status(404).body("".into()),
+                    };
+                    Ok(response.unwrap())
+                }
+            });
+            let client = Client::new(Arc::new(FakeSystemClock::new()), http_client, cx);
+            crate::init(client, cx);
+        });
+        cx.update(|cx| AutoUpdater::get(cx).expect("auto updater should exist"))
+    }
+
+    /// Waits until the updater has fetched the feed and finished handling it.
+    /// The download touches real files on other threads, so real time has to
+    /// pass rather than just the fake clock.
+    async fn settle(
+        cx: &mut TestAppContext,
+        updater: &Entity<AutoUpdater>,
+        observations: &FeedTestObservations,
+    ) {
+        cx.background_executor.allow_parking();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            cx.background_executor.timer(Duration::from_millis(0)).await;
+            cx.run_until_parked();
+            let finished = observations.feed_requested.load(atomic::Ordering::SeqCst)
+                && updater.read_with(cx, |updater, _| updater.pending_poll.is_none());
+            if finished {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the update check never finished"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[gpui::test]
+    async fn test_auto_update_installs_a_build_vouched_for_by_the_signed_feed(
+        cx: &mut TestAppContext,
+    ) {
+        let keypair = update_feed::generate_keypair().unwrap();
+        let feed = signed_feed_json(&keypair, "stable", "0.100.1", "<signed-update>");
+        let observations = Arc::new(FeedTestObservations::default());
+        let updater = start_updater_with_feed(
+            &keypair.public_key,
+            feed,
+            "<signed-update>",
+            &observations,
+            cx,
+        );
+
+        settle(cx, &updater, &observations).await;
+
+        assert!(observations.installed.load(atomic::Ordering::SeqCst));
+        assert_eq!(
+            updater.read_with(cx, |updater, _| updater.status()),
+            AutoUpdateStatus::Updated {
+                version: Version::new(0, 100, 1)
+            }
+        );
+    }
+
+    #[gpui::test]
+    async fn test_auto_update_refuses_a_download_that_does_not_match_the_signed_hash(
+        cx: &mut TestAppContext,
+    ) {
+        let keypair = update_feed::generate_keypair().unwrap();
+        let feed = signed_feed_json(&keypair, "stable", "0.100.1", "<signed-update>");
+        let observations = Arc::new(FeedTestObservations::default());
+        let updater = start_updater_with_feed(
+            &keypair.public_key,
+            feed,
+            "<swapped-by-the-host>",
+            &observations,
+            cx,
+        );
+
+        settle(cx, &updater, &observations).await;
+
+        assert!(
+            observations
+                .download_requested
+                .load(atomic::Ordering::SeqCst),
+            "the update should have been downloaded before being rejected"
+        );
+        assert!(!observations.installed.load(atomic::Ordering::SeqCst));
+        assert!(!matches!(
+            updater.read_with(cx, |updater, _| updater.status()),
+            AutoUpdateStatus::Updated { .. }
+        ));
+    }
+
+    #[gpui::test]
+    async fn test_auto_update_ignores_a_feed_signed_with_an_untrusted_key(cx: &mut TestAppContext) {
+        let attacker = update_feed::generate_keypair().unwrap();
+        let trusted = update_feed::generate_keypair().unwrap();
+        let feed = signed_feed_json(&attacker, "stable", "0.100.1", "<signed-update>");
+        let observations = Arc::new(FeedTestObservations::default());
+        let updater = start_updater_with_feed(
+            &trusted.public_key,
+            feed,
+            "<signed-update>",
+            &observations,
+            cx,
+        );
+
+        settle(cx, &updater, &observations).await;
+
+        assert!(observations.feed_requested.load(atomic::Ordering::SeqCst));
+        assert!(
+            !observations
+                .download_requested
+                .load(atomic::Ordering::SeqCst),
+            "nothing should be downloaded from an untrusted feed"
+        );
+        assert!(!observations.installed.load(atomic::Ordering::SeqCst));
+        assert_eq!(
+            updater.read_with(cx, |updater, _| updater.status()),
+            AutoUpdateStatus::Idle
+        );
     }
 
     #[gpui::test]
