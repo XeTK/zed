@@ -6551,6 +6551,7 @@ impl Sidebar {
             .trigger(move |_, _, _| thread_item)
             .menu({
                 let thread_id = thread.metadata.thread_id;
+                let agent_id = thread.metadata.agent_id.clone();
                 let markdown_title = Some(thread.metadata.display_title());
                 let rename_title = title;
                 move |_window, cx| {
@@ -6561,6 +6562,7 @@ impl Sidebar {
                     let markdown_title = markdown_title.clone();
                     let rename_title = rename_title.clone();
                     let folder_paths = folder_paths.clone();
+                    let agent_id = agent_id.clone();
                     ContextMenu::build(_window, cx, move |mut menu, _window, _cx| {
                         menu = menu.entry("Rename Title", None, {
                             let sidebar = sidebar.clone();
@@ -6635,6 +6637,26 @@ impl Sidebar {
                                             window,
                                             cx,
                                         );
+                                    }
+                                }
+                            });
+                        }
+
+                        if let Some(thread_workspace) = thread_workspace.clone() {
+                            menu = menu.entry("Open Thread in Tab", None, {
+                                let agent = Agent::from(agent_id.clone());
+                                move |window, cx| {
+                                    if let Some(panel) =
+                                        thread_workspace.read(cx).panel::<AgentPanel>(cx)
+                                    {
+                                        panel.update(cx, |panel, cx| {
+                                            panel.open_saved_thread_in_tab(
+                                                agent.clone(),
+                                                thread_id,
+                                                window,
+                                                cx,
+                                            );
+                                        });
                                     }
                                 }
                             });
