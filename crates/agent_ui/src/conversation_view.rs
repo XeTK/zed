@@ -1638,6 +1638,7 @@ impl ConversationView {
                         active.sync_elicitation_state_for_entry(index, window, cx);
                         active.sync_editor_mode(cx);
                         active.sync_generating_indicator(cx);
+                        active.sync_tool_call_timer(cx);
                     });
                 }
             }
@@ -1653,6 +1654,7 @@ impl ConversationView {
                         active.sync_elicitation_state_for_entry(*index, window, cx);
                         active.auto_expand_streaming_thought(cx);
                         active.sync_generating_indicator(cx);
+                        active.sync_tool_call_timer(cx);
                     });
                 }
             }
@@ -10455,6 +10457,66 @@ pub(crate) mod tests {
                     .unwrap()
             })
         })
+    }
+
+    #[gpui::test]
+    async fn test_tool_call_timer_runs_only_while_a_tool_call_is_running(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let tool_call_id = acp::ToolCallId::new("long-running");
+        let connection = StubAgentConnection::new();
+        // The tool call starts and never reports back, like a command left
+        // running after the turn that started it has ended.
+        connection.set_next_prompt_updates(vec![acp::SessionUpdate::ToolCall(
+            acp::ToolCall::new(tool_call_id.clone(), "Run something")
+                .kind(acp::ToolKind::Other)
+                .status(acp::ToolCallStatus::InProgress),
+        )]);
+
+        let (conversation_view, cx) =
+            setup_conversation_view(StubAgentServer::new(connection.clone()), cx).await;
+        let thread_view = active_thread(&conversation_view, cx);
+        let thread = thread_view.read_with(cx, |view, _| view.thread.clone());
+        assert!(
+            !thread_view.read_with(cx, |view, _| view.tool_call_timer_running()),
+            "nothing is running yet"
+        );
+
+        thread
+            .update(cx, |thread, cx| thread.send_raw("Go", cx))
+            .await
+            .unwrap();
+        cx.run_until_parked();
+        assert!(
+            thread_view.read_with(cx, |view, _| view.tool_call_timer_running()),
+            "a running tool call starts the timer"
+        );
+
+        cx.executor().advance_clock(Duration::from_secs(3));
+        cx.run_until_parked();
+        assert!(
+            thread_view.read_with(cx, |view, _| view.tool_call_timer_running()),
+            "the timer keeps going while the tool call runs"
+        );
+
+        thread
+            .update(cx, |thread, cx| {
+                thread.handle_session_update(
+                    acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+                        tool_call_id.clone(),
+                        acp::ToolCallUpdateFields::new().status(acp::ToolCallStatus::Completed),
+                    )),
+                    cx,
+                )
+            })
+            .unwrap();
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        assert!(
+            !thread_view.read_with(cx, |view, _| view.tool_call_timer_running()),
+            "the timer stops once nothing is running"
+        );
     }
 
     #[gpui::test]

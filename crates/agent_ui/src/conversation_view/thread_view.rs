@@ -25,8 +25,8 @@ use sandbox::{SandboxFsPolicy, SandboxNetPolicy, SandboxPolicy};
 use crate::completion_provider::{AvailableSkill, PromptLocalCommand, pluralize};
 use crate::message_editor::SharedSessionCapabilities;
 use crate::ui::{
-    SandboxGroup, SandboxRow, SandboxSection, SandboxStatusTooltip, TerminalSandboxWarning,
-    TerminalToolHeader,
+    ELAPSED_DISPLAY_THRESHOLD, SandboxGroup, SandboxRow, SandboxSection, SandboxStatusTooltip,
+    TerminalSandboxWarning, TerminalToolHeader,
 };
 use crate::unicode_confusables;
 
@@ -636,6 +636,10 @@ pub struct ThreadView {
     pending_sandbox_status_key: Option<SandboxStatusKey>,
     pub multi_root_callout_dismissed: bool,
     pub generating_indicator_in_list: bool,
+    /// Re-renders once a second while a tool call is running, so its elapsed
+    /// time keeps moving even when no turn is active (a terminal left running
+    /// in the background, say). Cleared when nothing is running.
+    tool_call_timer_task: Option<Task<()>>,
     pub skill_loading_issues: Vec<SkillLoadingIssue>,
     /// Issues the user has explicitly dismissed. Each entry is matched against
     /// emitted issues by full equality; when an issue no longer appears in the
@@ -1046,6 +1050,7 @@ impl ThreadView {
             pending_sandbox_status_key: None,
             multi_root_callout_dismissed: false,
             generating_indicator_in_list: false,
+            tool_call_timer_task: None,
             skill_loading_issues: Vec::new(),
             dismissed_skill_loading_issues: HashSet::default(),
             thread_search_bar: None,
@@ -7320,6 +7325,35 @@ impl ThreadView {
     }
 
     /// Ensures the list item count includes (or excludes) an extra item for the generating indicator
+    #[cfg(test)]
+    pub(crate) fn tool_call_timer_running(&self) -> bool {
+        self.tool_call_timer_task.is_some()
+    }
+
+    /// Starts the once-a-second re-render that keeps tool call run times
+    /// moving, if something is running and it is not already going.
+    pub fn sync_tool_call_timer(&mut self, cx: &mut Context<Self>) {
+        if self.tool_call_timer_task.is_some() || !self.thread.read(cx).has_running_tool_calls() {
+            return;
+        }
+        self.tool_call_timer_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+                let keep_going = this.update(cx, |this, cx| {
+                    cx.notify();
+                    let running = this.thread.read(cx).has_running_tool_calls();
+                    if !running {
+                        this.tool_call_timer_task = None;
+                    }
+                    running
+                });
+                if !matches!(keep_going, Ok(true)) {
+                    break;
+                }
+            }
+        }));
+    }
+
     pub(crate) fn sync_generating_indicator(&mut self, cx: &App) {
         let thread = self.thread.read(cx);
 
@@ -8226,6 +8260,10 @@ impl ThreadView {
             ToolCallStatus::WaitingForConfirmation { .. }
         );
         let is_terminal_tool = matches!(tool_call.kind, acp::ToolKind::Execute);
+        let run_time_label = tool_call
+            .run_time()
+            .filter(|run_time| *run_time > ELAPSED_DISPLAY_THRESHOLD)
+            .map(|run_time| format!("({})", duration_alt_display(run_time)));
 
         let is_edit =
             matches!(tool_call.kind, acp::ToolKind::Edit) || tool_call.diffs().next().is_some();
@@ -8535,6 +8573,15 @@ impl ThreadView {
                             ))
                             .child(
                                 h_flex()
+                                    .when_some(run_time_label, |this, label| {
+                                        this.child(
+                                            Label::new(label)
+                                                .buffer_font(cx)
+                                                .size(LabelSize::XSmall)
+                                                .color(Color::Muted)
+                                                .mr_1(),
+                                        )
+                                    })
                                     .when(is_collapsible || failed_or_canceled, |this| {
                                         let diff_for_discard = if has_revealed_diff
                                             && is_cancelled_edit

@@ -964,6 +964,11 @@ pub struct ToolCall {
     /// sandboxing was active (see [`SANDBOX_NOT_APPLIED_META_KEY`]). `None` when
     /// the command was sandboxed normally (or sandboxing was off).
     pub sandbox_not_applied: Option<SandboxNotAppliedReason>,
+    /// When the tool call first started running. `None` while it is pending or
+    /// waiting for confirmation, and for calls that finish without ever running.
+    started_at: Option<Instant>,
+    /// When the tool call reached a final status, if it had started running.
+    finished_at: Option<Instant>,
 }
 
 impl ToolCall {
@@ -1015,7 +1020,7 @@ impl ToolCall {
             cx,
         );
 
-        let result = Self {
+        let mut result = Self {
             id: tool_call.tool_call_id,
             label,
             title,
@@ -1032,7 +1037,10 @@ impl ToolCall {
             sandbox_authorization_details,
             sandbox_fallback_authorization_details,
             sandbox_not_applied,
+            started_at: None,
+            finished_at: None,
         };
+        result.record_status_timing();
         Ok(result)
     }
 
@@ -1225,7 +1233,49 @@ impl ToolCall {
             ToolCallStatus::Failed => self.update_acp_status(acp::ToolCallStatus::Failed),
             status @ (ToolCallStatus::WaitingForConfirmation { .. }
             | ToolCallStatus::Rejected
-            | ToolCallStatus::Canceled) => self.status = status,
+            | ToolCallStatus::Canceled) => {
+                self.status = status;
+                self.record_status_timing();
+            }
+        }
+    }
+
+    /// Notes when the call starts running and when it finishes. Call after
+    /// every change to `status`.
+    fn record_status_timing(&mut self) {
+        let now = Instant::now();
+        match self.status {
+            ToolCallStatus::InProgress => {
+                self.started_at.get_or_insert(now);
+                // Running again after having finished (a late update).
+                self.finished_at = None;
+            }
+            ToolCallStatus::Completed
+            | ToolCallStatus::Failed
+            | ToolCallStatus::Rejected
+            | ToolCallStatus::Canceled => {
+                if self.started_at.is_some() {
+                    self.finished_at.get_or_insert(now);
+                }
+            }
+            ToolCallStatus::Pending | ToolCallStatus::WaitingForConfirmation { .. } => {}
+        }
+    }
+
+    /// Whether the tool call is running right now.
+    pub fn is_running(&self) -> bool {
+        matches!(self.status, ToolCallStatus::InProgress)
+    }
+
+    /// How long the tool call has been running, or how long it ran for if it
+    /// has finished. `None` if it has not started running (still pending or
+    /// waiting for confirmation) or finished without ever running.
+    pub fn run_time(&self) -> Option<Duration> {
+        let started_at = self.started_at?;
+        match self.finished_at {
+            Some(finished_at) => Some(finished_at.duration_since(started_at)),
+            None if self.is_running() => Some(started_at.elapsed()),
+            None => None,
         }
     }
 
@@ -1239,6 +1289,7 @@ impl ToolCall {
             *current_status = status;
         } else {
             self.status = status.into();
+            self.record_status_timing();
         }
     }
 
@@ -2755,6 +2806,16 @@ impl AcpThread {
         false
     }
 
+    /// Whether any tool call in the whole thread is running right now,
+    /// including one still going from an earlier turn (a terminal moved to the
+    /// background, say).
+    pub fn has_running_tool_calls(&self) -> bool {
+        self.entries
+            .iter()
+            .rev()
+            .any(|entry| matches!(entry, AgentThreadEntry::ToolCall(call) if call.is_running()))
+    }
+
     pub fn has_in_progress_tool_calls(&self) -> bool {
         for entry in self.entries.iter().rev() {
             match entry {
@@ -3454,6 +3515,8 @@ impl AcpThread {
                     sandbox_authorization_details: None,
                     sandbox_fallback_authorization_details: None,
                     sandbox_not_applied: None,
+                    started_at: None,
+                    finished_at: None,
                 };
                 self.push_entry(AgentThreadEntry::ToolCall(failed_tool_call), cx);
                 return Ok(());
@@ -3740,6 +3803,7 @@ impl AcpThread {
         }
 
         call.status = ToolCallStatus::Canceled;
+        call.record_status_timing();
         cx.emit(AcpThreadEvent::EntryUpdated(ix));
         cx.emit(AcpThreadEvent::ToolAuthorizationReceived(id.clone()));
     }
@@ -3781,6 +3845,7 @@ impl AcpThread {
             };
 
         let curr_status = mem::replace(&mut call.status, new_status);
+        call.record_status_timing();
 
         if let ToolCallStatus::WaitingForConfirmation { respond_tx, .. } = curr_status {
             respond_tx
@@ -4305,6 +4370,7 @@ impl AcpThread {
                     if cancel {
                         let previous_status =
                             mem::replace(&mut call.status, ToolCallStatus::Canceled);
+                        call.record_status_timing();
                         if let ToolCallStatus::WaitingForConfirmation { respond_tx, .. } =
                             previous_status
                             && respond_tx.send(permission_outcome.clone()).is_err()
@@ -7250,6 +7316,163 @@ mod tests {
                 );
             });
         }
+    }
+
+    async fn tool_call_timing_thread(cx: &mut TestAppContext) -> Entity<AcpThread> {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let connection = Rc::new(FakeAgentConnection::new());
+        cx.update(|cx| {
+            connection.new_session(project, PathList::new(&[Path::new(path!("/test"))]), cx)
+        })
+        .await
+        .unwrap()
+    }
+
+    fn set_tool_call_status(
+        thread: &Entity<AcpThread>,
+        id: &acp::ToolCallId,
+        status: acp::ToolCallStatus,
+        cx: &mut TestAppContext,
+    ) {
+        thread.update(cx, |thread, cx| {
+            thread
+                .handle_session_update(
+                    acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+                        id.clone(),
+                        acp::ToolCallUpdateFields::new().status(status),
+                    )),
+                    cx,
+                )
+                .unwrap();
+        });
+    }
+
+    fn tool_call_timing(
+        thread: &Entity<AcpThread>,
+        cx: &mut TestAppContext,
+    ) -> (bool, Option<Duration>) {
+        thread.read_with(cx, |thread, _| {
+            let Some(AgentThreadEntry::ToolCall(call)) = thread.entries.last() else {
+                panic!("expected a tool call entry");
+            };
+            (call.is_running(), call.run_time())
+        })
+    }
+
+    #[gpui::test]
+    async fn test_tool_call_run_time_follows_its_status(cx: &mut TestAppContext) {
+        let thread = tool_call_timing_thread(cx).await;
+        let id = acp::ToolCallId::new("timed");
+
+        thread.update(cx, |thread, cx| {
+            thread
+                .handle_session_update(
+                    acp::SessionUpdate::ToolCall(
+                        acp::ToolCall::new(id.clone(), "Label")
+                            .kind(acp::ToolKind::Fetch)
+                            .status(acp::ToolCallStatus::Pending),
+                    ),
+                    cx,
+                )
+                .unwrap();
+        });
+        assert_eq!(tool_call_timing(&thread, cx), (false, None));
+        assert!(!thread.read_with(cx, |thread, _| thread.has_running_tool_calls()));
+
+        set_tool_call_status(&thread, &id, acp::ToolCallStatus::InProgress, cx);
+        let (running, first) = tool_call_timing(&thread, cx);
+        assert!(running);
+        let first = first.expect("a running call has a run time");
+        assert!(thread.read_with(cx, |thread, _| thread.has_running_tool_calls()));
+        let (_, later) = tool_call_timing(&thread, cx);
+        assert!(
+            later.expect("still running") >= first,
+            "the clock does not go backwards"
+        );
+
+        set_tool_call_status(&thread, &id, acp::ToolCallStatus::Completed, cx);
+        let (running, finished) = tool_call_timing(&thread, cx);
+        assert!(!running);
+        let finished = finished.expect("a finished call keeps its total");
+        assert!(finished >= first);
+        assert_eq!(
+            tool_call_timing(&thread, cx).1,
+            Some(finished),
+            "the total no longer grows once finished"
+        );
+        assert!(!thread.read_with(cx, |thread, _| thread.has_running_tool_calls()));
+    }
+
+    #[gpui::test]
+    async fn test_tool_call_that_never_ran_has_no_run_time(cx: &mut TestAppContext) {
+        let thread = tool_call_timing_thread(cx).await;
+        let id = acp::ToolCallId::new("never-ran");
+
+        thread.update(cx, |thread, cx| {
+            thread
+                .handle_session_update(
+                    acp::SessionUpdate::ToolCall(
+                        acp::ToolCall::new(id.clone(), "Label")
+                            .kind(acp::ToolKind::Fetch)
+                            .status(acp::ToolCallStatus::Pending),
+                    ),
+                    cx,
+                )
+                .unwrap();
+        });
+        set_tool_call_status(&thread, &id, acp::ToolCallStatus::Completed, cx);
+
+        assert_eq!(tool_call_timing(&thread, cx), (false, None));
+    }
+
+    #[gpui::test]
+    async fn test_canceling_a_running_tool_call_stops_its_clock(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let id = acp::ToolCallId::new("cancelled");
+
+        let connection = Rc::new(FakeAgentConnection::new().on_user_message({
+            let id = id.clone();
+            move |_, thread, mut cx| {
+                let id = id.clone();
+                async move {
+                    thread
+                        .update(&mut cx, |thread, cx| {
+                            thread.handle_session_update(
+                                acp::SessionUpdate::ToolCall(
+                                    acp::ToolCall::new(id.clone(), "Label")
+                                        .kind(acp::ToolKind::Fetch)
+                                        .status(acp::ToolCallStatus::InProgress),
+                                ),
+                                cx,
+                            )
+                        })
+                        .unwrap()
+                        .unwrap();
+                    Ok(acp::PromptResponse::new(acp::StopReason::EndTurn))
+                }
+                .boxed_local()
+            }
+        }));
+        let thread = cx
+            .update(|cx| {
+                connection.new_session(project, PathList::new(&[Path::new(path!("/test"))]), cx)
+            })
+            .await
+            .unwrap();
+        let _request = thread.update(cx, |thread, cx| thread.send_raw("Go", cx));
+        run_until_first_tool_call(&thread, cx).await;
+        assert!(tool_call_timing(&thread, cx).0, "the call is running");
+
+        thread.update(cx, |thread, cx| thread.cancel(cx)).await;
+
+        let (running, total) = tool_call_timing(&thread, cx);
+        assert!(!running);
+        let total = total.expect("a cancelled call that had started keeps its total");
+        assert_eq!(tool_call_timing(&thread, cx).1, Some(total));
     }
 
     #[gpui::test]
