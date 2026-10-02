@@ -3485,6 +3485,14 @@ impl Item for ConversationView {
     fn tab_content_text(&self, _detail: usize, cx: &App) -> SharedString {
         self.title(cx)
     }
+
+    fn tab_icon(&self, _window: &Window, _cx: &App) -> Option<Icon> {
+        Some(Icon::new(IconName::ZedAgent))
+    }
+
+    fn tab_tooltip_text(&self, cx: &App) -> Option<SharedString> {
+        Some(self.title(cx))
+    }
 }
 
 impl SerializableItem for ConversationView {

@@ -249,8 +249,11 @@ actions!(
         OpenActiveThreadAsMarkdown,
         /// Opens the agent diff view to review changes.
         OpenAgentDiff,
-        /// Opens the active thread as a tab in the current pane, alongside editors and terminals.
+        /// Moves the active thread into a tab in the current pane, alongside editors and
+        /// terminals, and gives the agent panel a fresh thread.
         OpenThreadInNewTab,
+        /// Starts a new thread in a tab in the current pane.
+        NewThreadInTab,
         /// Copies the current thread to the clipboard as JSON for debugging.
         CopyThreadToClipboard,
         /// Loads a thread from the clipboard JSON for debugging.

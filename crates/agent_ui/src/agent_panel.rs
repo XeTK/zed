@@ -50,9 +50,10 @@ use crate::{
 };
 use crate::{
     AgentDiffPane, ConversationView, CopyThreadToClipboard, Follow, LoadThreadFromClipboard,
-    NewTerminalThread, NewThread, OpenActiveThreadAsMarkdown, OpenAgentDiff, OpenThreadInNewTab,
-    RenameSelectedThread, ResetFastModeWarnings, ResetTrialEndUpsell, ResetTrialUpsell,
-    ShowAllSidebarThreadMetadata, ShowThreadMetadata, ToggleNewThreadMenu, ToggleOptionsMenu,
+    NewTerminalThread, NewThread, NewThreadInTab, OpenActiveThreadAsMarkdown, OpenAgentDiff,
+    OpenThreadInNewTab, RenameSelectedThread, ResetFastModeWarnings, ResetTrialEndUpsell,
+    ResetTrialUpsell, ShowAllSidebarThreadMetadata, ShowThreadMetadata, ToggleNewThreadMenu,
+    ToggleOptionsMenu,
     conversation_view::{
         AcpThreadViewEvent, RootThreadUpdated, ThreadView, reset_fast_mode_warnings,
     },
@@ -3774,31 +3775,84 @@ impl AgentPanel {
         }
     }
 
-    /// Opens the active conversation as a regular tab in the active pane,
-    /// alongside editors and terminals - the same underlying `ConversationView`
-    /// entity, not a copy, so either surface reflects live updates. The panel
-    /// itself is untouched by this; the thread just becomes viewable in a
-    /// second place, mirroring how a terminal's `TerminalView` can be a tab
-    /// wherever it's added, independent of the terminal dock.
+    /// Moves the active conversation into a regular tab in the active pane,
+    /// alongside editors and terminals. It is the same `ConversationView`
+    /// entity, not a copy, and the panel switches to a fresh thread so the
+    /// conversation is not shown in two places at once.
     pub(crate) fn open_thread_in_new_tab(
         &mut self,
         _: &OpenThreadInNewTab,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(workspace) = self.workspace.upgrade()
-            && let Some(conversation_view) = self.active_conversation_view().cloned()
-        {
-            workspace.update(cx, |workspace, cx| {
-                workspace.add_item_to_active_pane(
-                    Box::new(conversation_view),
-                    None,
-                    true,
-                    window,
-                    cx,
-                );
-            });
+        self.move_active_thread_to_tab(window, cx);
+    }
+
+    pub(crate) fn new_thread_in_tab(
+        &mut self,
+        _: &NewThreadInTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.has_open_project(cx) {
+            return;
         }
+        self.activate_new_thread(false, AgentThreadSource::AgentPanel, window, cx);
+        self.move_active_thread_to_tab(window, cx);
+    }
+
+    /// Opens a saved thread, such as one picked from history, in a tab in the
+    /// active pane rather than in the panel.
+    pub fn open_saved_thread_in_tab(
+        &mut self,
+        agent: Agent,
+        thread_id: ThreadId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.load_agent_thread(
+            agent,
+            thread_id,
+            None,
+            None,
+            false,
+            AgentThreadSource::AgentPanel,
+            window,
+            cx,
+        );
+        if self
+            .active_conversation_view()
+            .is_some_and(|view| view.read(cx).thread_id == thread_id)
+        {
+            self.move_active_thread_to_tab(window, cx);
+        }
+    }
+
+    fn move_active_thread_to_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let Some(conversation_view) = self.active_conversation_view().cloned() else {
+            return;
+        };
+
+        workspace.update(cx, |workspace, cx| {
+            workspace.add_item_to_active_pane(
+                Box::new(conversation_view.clone()),
+                None,
+                true,
+                window,
+                cx,
+            );
+        });
+
+        // The ephemeral draft slot would otherwise be reused for the panel's
+        // next new thread, putting the tab's conversation back in the panel.
+        if self.draft_thread.as_ref() == Some(&conversation_view) {
+            self.draft_thread = None;
+            self._draft_editor_observation = None;
+        }
+        self.activate_new_thread(false, AgentThreadSource::AgentPanel, window, cx);
     }
 
     pub fn open_thread_as_markdown(
@@ -5760,7 +5814,8 @@ impl AgentPanel {
                                 }
 
                                 menu = menu
-                                    .action("Open Thread in New Tab", Box::new(OpenThreadInNewTab));
+                                    .action("Move Thread to New Tab", Box::new(OpenThreadInNewTab))
+                                    .action("New Thread in Tab", Box::new(NewThreadInTab));
 
                                 menu = menu.separator();
                             }
@@ -6587,6 +6642,7 @@ impl Render for AgentPanel {
             }))
             .on_action(cx.listener(Self::open_active_thread_as_markdown))
             .on_action(cx.listener(Self::open_thread_in_new_tab))
+            .on_action(cx.listener(Self::new_thread_in_tab))
             .on_action(cx.listener(Self::manage_skills))
             .on_action(cx.listener(Self::toggle_options_menu))
             .on_action(cx.listener(Self::increase_font_size))
@@ -11373,7 +11429,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn test_open_thread_in_new_tab_adds_same_conversation_to_active_pane(
+    async fn test_open_thread_in_new_tab_moves_conversation_to_active_pane(
         cx: &mut TestAppContext,
     ) {
         let (panel, mut cx) = setup_panel(cx).await;
@@ -11433,6 +11489,141 @@ mod tests {
                 opened_item.tab_content_text(0, cx),
                 conversation_view.read(cx).title(cx),
                 "the tab should be labelled with the thread's title"
+            );
+        });
+
+        panel.read_with(&cx, |panel, _cx| {
+            let active = panel
+                .active_conversation_view()
+                .expect("the panel should switch to a fresh thread");
+            assert_ne!(
+                active.entity_id(),
+                conversation_view.entity_id(),
+                "the conversation moved to the tab should not also be the panel's active thread"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_new_thread_in_tab_opens_a_fresh_thread_as_a_tab(cx: &mut TestAppContext) {
+        let (panel, mut cx) = setup_panel(cx).await;
+        cx.run_until_parked();
+
+        panel.update(&mut cx, |panel, cx| {
+            panel.connection_store.update(cx, |store, cx| {
+                store.restart_connection(
+                    Agent::NativeAgent,
+                    Rc::new(StubAgentServer::new(SessionTrackingConnection::new())),
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+
+        let workspace = panel.read_with(&cx, |panel, _cx| {
+            panel
+                .workspace
+                .upgrade()
+                .expect("workspace should still be alive")
+        });
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.new_thread_in_tab(&NewThreadInTab, window, cx);
+        });
+        cx.run_until_parked();
+
+        let tab_view_ids = workspace.read_with(&cx, |workspace, cx| {
+            workspace
+                .active_pane()
+                .read(cx)
+                .items()
+                .map(|item| item.item_id())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(tab_view_ids.len(), 1, "one thread should be open as a tab");
+        panel.read_with(&cx, |panel, _cx| {
+            let active = panel
+                .active_conversation_view()
+                .expect("the panel should still have a thread");
+            assert!(
+                !tab_view_ids.contains(&active.entity_id()),
+                "the new tab's thread should not also be the panel's thread"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_open_saved_thread_in_tab_opens_that_thread_as_a_tab(cx: &mut TestAppContext) {
+        let (panel, mut cx) = setup_panel(cx).await;
+        cx.run_until_parked();
+
+        panel.update(&mut cx, |panel, cx| {
+            panel.connection_store.update(cx, |store, cx| {
+                store.restart_connection(
+                    Agent::NativeAgent,
+                    Rc::new(StubAgentServer::new(SessionTrackingConnection::new())),
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.external_thread(
+                Some(Agent::NativeAgent),
+                None,
+                None,
+                None,
+                None,
+                true,
+                AgentThreadSource::AgentPanel,
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        let (thread_id, workspace) = panel.read_with(&cx, |panel, cx| {
+            (
+                panel
+                    .active_conversation_view()
+                    .expect("thread should be open")
+                    .read(cx)
+                    .thread_id,
+                panel
+                    .workspace
+                    .upgrade()
+                    .expect("workspace should still be alive"),
+            )
+        });
+
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.new_thread(&NewThread, window, cx);
+        });
+        cx.run_until_parked();
+
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.open_saved_thread_in_tab(Agent::NativeAgent, thread_id, window, cx);
+        });
+        cx.run_until_parked();
+
+        workspace.read_with(&cx, |workspace, cx| {
+            let tab_thread_ids = workspace
+                .active_pane()
+                .read(cx)
+                .items()
+                .filter_map(|item| item.downcast::<ConversationView>())
+                .map(|view| view.read(cx).thread_id)
+                .collect::<Vec<_>>();
+            assert_eq!(tab_thread_ids, vec![thread_id]);
+        });
+        panel.read_with(&cx, |panel, cx| {
+            let active = panel
+                .active_conversation_view()
+                .expect("the panel should still have a thread");
+            assert_ne!(
+                active.read(cx).thread_id,
+                thread_id,
+                "the saved thread should have left the panel"
             );
         });
     }
