@@ -265,7 +265,7 @@ struct GlobalAutoUpdate(Option<Entity<AutoUpdater>>);
 impl Global for GlobalAutoUpdate {}
 
 /// Where to fetch signed update feeds from, and the key they must be signed
-/// with. When set, updates come from `{base_url}/{channel}/latest.json` and are
+/// with. When set, updates come from `{base_url}/{channel}/{os}-{arch}/latest.json` and are
 /// only installed if the feed's signature and the download's hash check out,
 /// instead of asking zed.dev's release API (which has no signatures).
 #[derive(Clone, Debug)]
@@ -773,8 +773,8 @@ impl AutoUpdater {
         })
     }
 
-    /// Fetches this channel's `latest.json` and returns it only if it is
-    /// signed with the configured key and is for this platform.
+    /// Fetches this channel's `latest.json` for this platform and returns it
+    /// only if it is signed with the configured key and is for this platform.
     async fn get_signed_feed(
         this: &Entity<Self>,
         release_channel: ReleaseChannel,
@@ -783,7 +783,7 @@ impl AutoUpdater {
     ) -> Result<update_feed::Feed> {
         let http_client = this.read_with(cx, |this, _| this.client.http_client());
         let url = format!(
-            "{}/{}/latest.json",
+            "{}/{}/{OS}-{ARCH}/latest.json",
             config.base_url.trim_end_matches('/'),
             release_channel.dev_name()
         );
@@ -1666,8 +1666,9 @@ mod tests {
                 let observations = observations.clone();
                 let feed_json = feed_json.clone();
                 async move {
+                    let platform_feed_path = format!("/stable/{OS}-{ARCH}/latest.json");
                     let response = match request.uri().path() {
-                        "/stable/latest.json" => {
+                        path if path == platform_feed_path => {
                             observations
                                 .feed_requested
                                 .store(true, atomic::Ordering::SeqCst);
