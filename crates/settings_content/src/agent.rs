@@ -360,6 +360,10 @@ pub struct AgentSettingsContent {
     ///
     /// Default: true
     pub expand_terminal_card: Option<bool>,
+    /// Whether to have tool call cards in the agent panel expand automatically when they return an image.
+    ///
+    /// Default: false
+    pub expand_image_card: Option<bool>,
     /// Command to automatically run when Zed creates a Terminal Thread shell in the agent panel.
     /// The command is sent to the shell as if typed, so it is interpreted by your
     /// configured shell (including on Windows and remote/WSL projects).

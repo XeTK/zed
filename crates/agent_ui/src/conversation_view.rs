@@ -10527,6 +10527,76 @@ pub(crate) mod tests {
         );
     }
 
+    async fn image_tool_call_expansion(expand_image_card: bool, cx: &mut TestAppContext) -> bool {
+        use gpui::UpdateGlobal as _;
+
+        init_test(cx);
+        cx.update(|cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |content| {
+                    content.agent.get_or_insert_default().expand_image_card =
+                        Some(expand_image_card);
+                });
+            });
+        });
+
+        let tool_call_id = acp::ToolCallId::new("screenshot");
+        let image = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+        let connection = StubAgentConnection::new();
+        connection.set_next_prompt_updates(vec![acp::SessionUpdate::ToolCall(
+            acp::ToolCall::new(tool_call_id.clone(), "Take a screenshot")
+                .kind(acp::ToolKind::Other)
+                .status(acp::ToolCallStatus::Completed)
+                .content(vec![acp::ToolCallContent::Content(acp::Content::new(
+                    acp::ContentBlock::Image(acp::ImageContent::new(image, "image/png")),
+                ))]),
+        )]);
+
+        let (conversation_view, cx) =
+            setup_conversation_view(StubAgentServer::new(connection.clone()), cx).await;
+        let thread_view = active_thread(&conversation_view, cx);
+        let thread = thread_view.read_with(cx, |view, _| view.thread.clone());
+        thread
+            .update(cx, |thread, cx| thread.send_raw("Go", cx))
+            .await
+            .unwrap();
+        cx.run_until_parked();
+
+        let entry_view_state = thread_view.read_with(cx, |view, _| view.entry_view_state.clone());
+        let expanded =
+            entry_view_state.read_with(cx, |state, _| state.is_tool_call_expanded(&tool_call_id));
+
+        // A later update to the card must not re-expand one the user collapsed.
+        entry_view_state.update(cx, |state, _| state.collapse_tool_call(&tool_call_id));
+        thread
+            .update(cx, |thread, cx| {
+                thread.handle_session_update(
+                    acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+                        tool_call_id.clone(),
+                        acp::ToolCallUpdateFields::new().title("Screenshot taken"),
+                    )),
+                    cx,
+                )
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert!(
+            !entry_view_state.read_with(cx, |state, _| state.is_tool_call_expanded(&tool_call_id)),
+            "a collapsed image card stays collapsed after an update"
+        );
+        expanded
+    }
+
+    #[gpui::test]
+    async fn test_image_tool_call_expands_when_the_setting_is_on(cx: &mut TestAppContext) {
+        assert!(image_tool_call_expansion(true, cx).await);
+    }
+
+    #[gpui::test]
+    async fn test_image_tool_call_stays_collapsed_when_the_setting_is_off(cx: &mut TestAppContext) {
+        assert!(!image_tool_call_expansion(false, cx).await);
+    }
+
     #[gpui::test]
     async fn test_conversation_multiple_tool_calls_fifo_ordering(cx: &mut TestAppContext) {
         init_test(cx);

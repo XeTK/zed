@@ -8939,6 +8939,25 @@ fn ai_page(cx: &App) -> SettingsPage {
                 files: USER,
             }),
             SettingsPageItem::SettingItem(SettingItem {
+                title: "Expand Image Card",
+                description: "Whether to have tool call cards in the agent panel expand automatically when they return an image.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("agent.expand_image_card"),
+                    pick: |settings_content| {
+                        settings_content.agent.as_ref()?.expand_image_card.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .agent
+                            .get_or_insert_default()
+                            .expand_image_card = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
                 title: "Expand Terminal Card",
                 description: "Whether to have terminal cards in the agent panel expanded, showing the whole command output.",
                 field: Box::new(SettingField {

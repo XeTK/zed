@@ -285,6 +285,9 @@ impl EntryViewState {
                 let id = tool_call.id.clone();
                 let terminals = tool_call.terminals().cloned().collect::<Vec<_>>();
                 let diffs = tool_call.diffs().cloned().collect::<Vec<_>>();
+                let has_image = tool_call.content.iter().any(|content| {
+                    matches!(content, acp_thread::ToolCallContent::ContentBlock(block) if block.image().is_some())
+                });
 
                 let views = if let Some(Entry::ToolCall(tool_call)) = self.entries.get_mut(index) {
                     &mut tool_call.content
@@ -294,6 +297,7 @@ impl EntryViewState {
                         Entry::ToolCall(ToolCallEntry {
                             content: HashMap::default(),
                             focus_handle: cx.focus_handle(),
+                            announced_image: false,
                         }),
                     );
                     let Some(Entry::ToolCall(tool_call)) = self.entries.get_mut(index) else {
@@ -377,6 +381,19 @@ impl EntryViewState {
                             view_event: ViewEvent::NewDiff(id.clone()),
                         });
                         editor.into_any()
+                    });
+                }
+
+                // Announced once, so a card the user collapses again stays collapsed
+                // when the tool call is later updated.
+                if has_image
+                    && let Some(Entry::ToolCall(entry)) = self.entries.get_mut(index)
+                    && !entry.announced_image
+                {
+                    entry.announced_image = true;
+                    cx.emit(EntryViewEvent {
+                        entry_index: index,
+                        view_event: ViewEvent::NewImage(id),
                     });
                 }
             }
@@ -495,6 +512,7 @@ pub struct EntryViewEvent {
 pub enum ViewEvent {
     NewDiff(acp::ToolCallId),
     NewTerminal(acp::ToolCallId),
+    NewImage(acp::ToolCallId),
     TerminalMovedToBackground(acp::ToolCallId),
     MessageEditorEvent(Entity<MessageEditor>, MessageEditorEvent),
     OpenDiffLocation {
@@ -528,6 +546,7 @@ impl AssistantMessageEntry {
 pub struct ToolCallEntry {
     content: HashMap<EntityId, AnyEntity>,
     focus_handle: FocusHandle,
+    announced_image: bool,
 }
 
 #[derive(Debug)]
