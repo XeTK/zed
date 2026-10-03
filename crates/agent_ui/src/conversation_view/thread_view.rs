@@ -7464,7 +7464,49 @@ impl ThreadView {
         }
     }
 
-    fn render_generating(&self, confirmation: bool, cx: &App) -> impl IntoElement {
+    /// Entries in this thread that are waiting on the user, in thread order,
+    /// with how many requests each holds: tool calls waiting for confirmation,
+    /// pending questions, and subagent tool calls whose subagent is waiting.
+    pub(crate) fn entries_awaiting_user(&self, cx: &App) -> Vec<(usize, usize)> {
+        let thread = self.thread.read(cx);
+        let conversation = self.conversation.read(cx);
+        thread
+            .entries()
+            .iter()
+            .enumerate()
+            .filter_map(|(entry_ix, entry)| {
+                let count = match entry {
+                    AgentThreadEntry::ToolCall(tool_call) => {
+                        if matches!(
+                            tool_call.status,
+                            ToolCallStatus::WaitingForConfirmation { .. }
+                        ) {
+                            1
+                        } else {
+                            tool_call
+                                .subagent_session_info
+                                .as_ref()
+                                .map(|info| {
+                                    conversation
+                                        .pending_tool_call_count_for_session(&info.session_id)
+                                })
+                                .unwrap_or(0)
+                        }
+                    }
+                    AgentThreadEntry::Elicitation(elicitation_id) => thread
+                        .elicitation(elicitation_id)
+                        .is_some_and(|(_, elicitation)| {
+                            matches!(elicitation.status, ElicitationStatus::Pending { .. })
+                        })
+                        .into(),
+                    _ => 0,
+                };
+                (count > 0).then_some((entry_ix, count))
+            })
+            .collect()
+    }
+
+    fn render_generating(&self, confirmation: bool, cx: &Context<Self>) -> impl IntoElement {
         let show_stats = AgentSettings::get_global(cx).show_turn_stats;
         let elapsed_label = show_stats
             .then(|| {
@@ -7502,6 +7544,14 @@ impl ThreadView {
             .gap_2()
             .map(|this| {
                 if confirmation {
+                    let awaiting = self.entries_awaiting_user(cx);
+                    let awaiting_count: usize = awaiting.iter().map(|(_, count)| count).sum();
+                    let label: SharedString = if awaiting_count > 1 {
+                        format!("Awaiting Confirmation ({awaiting_count})").into()
+                    } else {
+                        "Awaiting Confirmation".into()
+                    };
+                    let first_awaiting = awaiting.first().map(|(entry_ix, _)| *entry_ix);
                     this.child(
                         h_flex()
                             .w_2()
@@ -7510,11 +7560,18 @@ impl ThreadView {
                     )
                     .child(
                         div().min_w(rems(8.)).child(
-                            LoadingLabel::new("Awaiting Confirmation")
+                            LoadingLabel::new(label)
                                 .size(LabelSize::Small)
                                 .color(Color::Muted),
                         ),
                     )
+                    .when_some(first_awaiting, |this, entry_ix| {
+                        this.cursor_pointer()
+                            .tooltip(Tooltip::text("Go to the request waiting for you"))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.scroll_to_entry_awaiting_user(entry_ix, cx);
+                            }))
+                    })
                 } else if is_blocked_on_terminal_command {
                     this
                 } else {
@@ -7550,6 +7607,24 @@ impl ThreadView {
                 )
             })
             .into_any_element()
+    }
+
+    pub(crate) fn scroll_to_entry_awaiting_user(&mut self, entry_ix: usize, cx: &mut Context<Self>) {
+        // A subagent's request is rendered inside its card, so open the card too.
+        if let Some(AgentThreadEntry::ToolCall(tool_call)) =
+            self.thread.read(cx).entries().get(entry_ix)
+            && tool_call.subagent_session_info.is_some()
+        {
+            let tool_call_id = tool_call.id.clone();
+            self.entry_view_state.update(cx, |state, _cx| {
+                state.expand_tool_call(tool_call_id);
+            });
+        }
+        self.list_state.scroll_to(ListOffset {
+            item_ix: entry_ix,
+            offset_in_item: px(0.0),
+        });
+        cx.notify();
     }
 
     pub(crate) fn auto_expand_streaming_thought(&mut self, cx: &mut Context<Self>) {

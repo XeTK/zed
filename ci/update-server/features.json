@@ -74,6 +74,13 @@
     },
     {
       "section": "agent",
+      "title": "Jump to what is waiting for you",
+      "details": [
+        "When a thread is waiting on you, the **Awaiting Confirmation** line at the bottom shows how many requests are waiting, including ones from its subagents. Click it to scroll to the first one; a subagent's card opens so its request is visible. No setting."
+      ]
+    },
+    {
+      "section": "agent",
       "title": "Threads as tabs",
       "summary": "Move a conversation out of the panel into the editor area.",
       "details": [

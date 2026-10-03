@@ -9716,6 +9716,99 @@ pub(crate) mod tests {
     }
 
     #[gpui::test]
+    async fn test_awaiting_confirmation_counts_and_jumps_to_waiting_requests(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+
+        let first_id = acp::ToolCallId::new("awaiting-1");
+        let second_id = acp::ToolCallId::new("awaiting-2");
+        let permission_options =
+            ToolPermissionContext::new(TerminalTool::NAME, vec!["cargo test".to_string()])
+                .build_permission_options();
+        let connection = StubAgentConnection::new().with_permission_requests(HashMap::from_iter([
+            (first_id.clone(), permission_options.clone()),
+            (second_id.clone(), permission_options),
+        ]));
+        connection.set_next_prompt_updates(vec![
+            acp::SessionUpdate::ToolCall(
+                acp::ToolCall::new(first_id.clone(), "Run `cargo test`").kind(acp::ToolKind::Edit),
+            ),
+            acp::SessionUpdate::ToolCall(
+                acp::ToolCall::new(second_id.clone(), "Run `cargo build`")
+                    .kind(acp::ToolKind::Edit),
+            ),
+        ]);
+
+        let (conversation_view, cx) =
+            setup_conversation_view(StubAgentServer::new(connection), cx).await;
+        add_to_workspace(conversation_view.clone(), cx);
+        cx.update(|_window, cx| {
+            AgentSettings::override_global(
+                AgentSettings {
+                    notify_when_agent_waiting: NotifyWhenAgentWaiting::Never,
+                    ..AgentSettings::get_global(cx).clone()
+                },
+                cx,
+            );
+        });
+
+        let message_editor = message_editor(&conversation_view, cx);
+        message_editor.update_in(cx, |editor, window, cx| {
+            editor.set_text("Run tests", window, cx);
+        });
+        let thread_view = active_thread(&conversation_view, cx);
+        thread_view.update_in(cx, |view, window, cx| view.send(window, cx));
+        cx.run_until_parked();
+
+        let (awaiting, first_entry_ix) = thread_view.read_with(cx, |view, cx| {
+            let first_entry_ix = view
+                .thread
+                .read(cx)
+                .tool_call(&first_id)
+                .map(|(entry_ix, _)| entry_ix)
+                .expect("the first tool call should be in the thread");
+            (view.entries_awaiting_user(cx), first_entry_ix)
+        });
+        assert_eq!(awaiting.iter().map(|(_, count)| count).sum::<usize>(), 2);
+        assert_eq!(
+            awaiting.first().map(|(entry_ix, _)| *entry_ix),
+            Some(first_entry_ix)
+        );
+
+        thread_view.update(cx, |view, cx| {
+            view.list_state.scroll_to(ListOffset {
+                item_ix: 0,
+                offset_in_item: px(0.0),
+            });
+            view.scroll_to_entry_awaiting_user(first_entry_ix, cx);
+        });
+        thread_view.read_with(cx, |view, _| {
+            assert_eq!(view.list_state.logical_scroll_top().item_ix, first_entry_ix);
+        });
+
+        conversation_view.update_in(cx, |_, window, cx| {
+            window.dispatch_action(
+                crate::AuthorizeToolCall {
+                    tool_call_id: "awaiting-1".to_string(),
+                    option_id: "allow".to_string(),
+                    option_kind: "AllowOnce".to_string(),
+                }
+                .boxed_clone(),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        let awaiting = thread_view.read_with(cx, |view, cx| view.entries_awaiting_user(cx));
+        assert_eq!(
+            awaiting.iter().map(|(_, count)| count).sum::<usize>(),
+            1,
+            "the count drops as requests are answered"
+        );
+    }
+
+    #[gpui::test]
     async fn test_authorize_tool_call_action_triggers_authorization(cx: &mut TestAppContext) {
         init_test(cx);
 
