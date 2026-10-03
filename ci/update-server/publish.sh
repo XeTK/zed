@@ -82,10 +82,12 @@ if [ "${platform}" = "macos-aarch64" ]; then
   cp "${feed}" "${stage}/${legacy_feed}"
 fi
 cp "$(dirname "$0")/index.html" "${stage}/index.html"
+cp "$(dirname "$0")/features.html" "${stage}/features.html"
+cp "$(dirname "$0")/features.json" "${stage}/features.json"
 # World-readable for nginx. Set here and sent with -p, because the openrsync
 # macOS ships as /usr/bin/rsync does not understand --chmod.
 chmod 755 "${stage}" "${stage}/${channel}" "${stage}/${platform_dir}"
-chmod 644 "${stage}/${platform_dir}/${name}" "${stage}/${platform_dir}/latest.json" "${stage}/index.html"
+chmod 644 "${stage}/${platform_dir}/${name}" "${stage}/${platform_dir}/latest.json" "${stage}/index.html" "${stage}/features.html" "${stage}/features.json"
 if [ -n "${legacy_feed}" ]; then
   chmod 644 "${stage}/${legacy_feed}"
 fi
@@ -94,7 +96,7 @@ destination="${user}@${host}"
 
 # 1. The build and its alias, not yet any feed. Syncing from the root creates
 # <channel>/<platform>/ on a host that has never seen this platform.
-"${rsync_bin}" -rltp --exclude latest.json --exclude index.html -e "${ssh_command}" \
+"${rsync_bin}" -rltp --exclude latest.json --exclude index.html --exclude features.html --exclude features.json -e "${ssh_command}" \
   "${stage}/" "${destination}:"
 
 # 2. The feed, which makes the new build visible to clients.
@@ -105,8 +107,8 @@ if [ -n "${legacy_feed}" ]; then
     "${stage}/${legacy_feed}" "${destination}:${channel}/"
 fi
 
-# 3. The landing page.
+# 3. The landing page and the features page it links to.
 "${rsync_bin}" -tp -e "${ssh_command}" \
-  "${stage}/index.html" "${destination}:"
+  "${stage}/index.html" "${stage}/features.html" "${stage}/features.json" "${destination}:"
 
 echo "published ${channel} ${platform}: ${name}"

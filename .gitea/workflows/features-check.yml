@@ -1,0 +1,24 @@
+# Keeps the features page honest: every setting it names must exist in the
+# default settings, and every entry must be complete. See
+# ci/update-server/README.md for how to add a feature.
+name: features-check
+
+on:
+  pull_request:
+    paths:
+      - "ci/update-server/**"
+      - "assets/settings/default.json"
+      - ".gitea/workflows/features-check.yml"
+
+jobs:
+  features:
+    runs-on: macos
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          clean: false
+
+      - name: Check features.json
+        run: python3 ci/update-server/test_features.py

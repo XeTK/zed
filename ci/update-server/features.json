@@ -1,0 +1,141 @@
+{
+  "intro": "Everything here is on top of upstream Zed. Settings go in your user `settings.json` (`cmd-,`) unless it says project, and most also appear in the settings UI.",
+  "sections": [
+    {
+      "id": "projects",
+      "title": "Projects and windows"
+    },
+    {
+      "id": "agent",
+      "title": "Agent panel"
+    },
+    {
+      "id": "stability",
+      "title": "Stability and performance"
+    },
+    {
+      "id": "updates",
+      "title": "Updates"
+    }
+  ],
+  "features": [
+    {
+      "section": "projects",
+      "title": "Window accent color per project",
+      "summary": "Tint a project's title bar so windows are easy to tell apart.",
+      "details": [
+        "Add a hex color to the project's `.zed/settings.json`, or set it in the settings UI.",
+        "The project's name in the sidebar gets the same color, with text that stays readable on it. Unset means the normal theme title bar."
+      ],
+      "example": "{ \"window_accent_color\": \"#3b82f6\" }",
+      "settings": [
+        "window_accent_color"
+      ],
+      "pr": 4
+    },
+    {
+      "section": "projects",
+      "title": "Next and previous project",
+      "summary": "Switch between the projects in a window from the keyboard.",
+      "details": [
+        "`cmd-alt-]` and `cmd-alt-[` on macOS, `ctrl-alt-]` and `ctrl-alt-[` on Linux and Windows. The actions are `multi_workspace::NextProject` and `multi_workspace::PreviousProject`."
+      ],
+      "pr": 6
+    },
+    {
+      "section": "projects",
+      "title": "Reorder projects in the sidebar",
+      "details": [
+        "Drag a project's header row up or down in the sidebar to reorder the projects."
+      ],
+      "pr": 26
+    },
+    {
+      "section": "agent",
+      "title": "Message timestamps",
+      "summary": "When each message was sent. Saved with Zed agent threads.",
+      "details": [
+        "Hover a message to see its time, and hover the time for the full date. To always show it, use the setting below.",
+        "Values are `\"on_hover\"` (default) and `\"always\"`. Threads saved before this feature, and history loaded from external agents, show no time."
+      ],
+      "example": "{ \"agent\": { \"message_timestamps\": \"always\" } }",
+      "settings": [
+        "message_timestamps"
+      ],
+      "pr": 39
+    },
+    {
+      "section": "agent",
+      "title": "Elapsed time on tool calls",
+      "details": [
+        "Every running tool call shows how long it has been running once it passes a second, not only terminal commands. No setting."
+      ],
+      "pr": 38
+    },
+    {
+      "section": "agent",
+      "title": "Threads as tabs",
+      "summary": "Move a conversation out of the panel into the editor area.",
+      "details": [
+        "Thread menu in the panel: **Move Thread to New Tab** hands the active thread to a tab and gives the panel a fresh thread.",
+        "Thread menu: **New Thread in Tab** starts a new thread directly in a tab.",
+        "Right-click a thread in the sidebar: **Open Thread in Tab**.",
+        "Tabs behave like any other tab: reorder, drag between panes, split. They come back after a restart."
+      ],
+      "pr": 41
+    },
+    {
+      "section": "agent",
+      "title": "Unsent draft flag",
+      "details": [
+        "A thread whose message box holds unsent text shows a pencil icon in the sidebar. The text is kept across restarts. No setting."
+      ],
+      "pr": 18
+    },
+    {
+      "section": "agent",
+      "title": "Expand image cards",
+      "summary": "Off by default.",
+      "details": [
+        "Tool call cards that return an image, such as a screenshot, expand on their own the first time the image arrives. If you collapse the card again it stays collapsed."
+      ],
+      "example": "{ \"agent\": { \"expand_image_card\": true } }",
+      "settings": [
+        "expand_image_card"
+      ],
+      "pr": 44
+    },
+    {
+      "section": "agent",
+      "title": "Archive search",
+      "details": [
+        "The threads archive matches and highlights the title shown on screen, including titles you renamed."
+      ],
+      "pr": 11
+    },
+    {
+      "section": "stability",
+      "title": "Child processes are cleaned up",
+      "details": [
+        "MCP context servers and external agents are killed along with everything they started, including processes that detached from them, when they are dropped and when Zed quits. Before, some could be left running after Zed exited."
+      ],
+      "pr": 29
+    },
+    {
+      "section": "stability",
+      "title": "Smaller fixes",
+      "details": [
+        "Releasing UI focus handles and recomputing bracket colors no longer do needless work on every frame or theme change."
+      ],
+      "pr": 21
+    },
+    {
+      "section": "updates",
+      "title": "Signed updates from this site",
+      "details": [
+        "The app checks `zed.xetk.co.uk` for a new build and installs it only if the Ed25519 signature and the SHA-256 checksum match. It has its own name and bundle id, so it can sit next to an official Zed. Nightly builds follow every change to main; stable follows tagged releases."
+      ],
+      "pr": 31
+    }
+  ]
+}

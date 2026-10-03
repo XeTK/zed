@@ -6,6 +6,7 @@ The signed update feed, builds and landing page for the xetk fork of Zed.
 |---|---|
 | `publish.sh` | Pushes a signed build to the host over rsync. Called by `.gitea/workflows/build-mac.yml` on main and tags. |
 | `index.html` | The landing page; reads each platform's `latest.json` and lists the platforms that have one, the visitor's first. Published with every build. |
+| `features.html`, `features.json` | The page describing what the fork adds and how to enable each feature. The page only renders; **to document a feature, add an entry to `features.json`** (see below). Published with every build. |
 
 ## How a build gets there
 
@@ -22,6 +23,8 @@ Layout on the host:
 
 ```
 index.html
+features.html
+features.json
 <channel>/latest.json                                 legacy, see below
 <channel>/<os>-<arch>/latest.json                     the signed feed
 <channel>/<os>-<arch>/Zed-xetk-<channel>-<run>-<arch>.<ext>   one immutable file per build
@@ -72,3 +75,25 @@ This repo only holds the producer. The host is infrastructure code elsewhere:
 - `ZED_PUBLISH_SSH_KEY` (Gitea secret) is the `zed-publish` account's key. It
   is replaceable: change the key in `xetk/infra`'s `guest_restricted_users`
   and the secret together.
+
+## Documenting a feature
+
+Every user-facing feature adds one entry to `features.json`, in the same PR:
+
+```json
+{
+  "section": "agent",
+  "title": "Short name",
+  "summary": "One line, optional.",
+  "details": ["How it works and how to turn it on. `code` and **bold** are supported."],
+  "example": "{ \"agent\": { \"some_setting\": true } }",
+  "settings": ["some_setting"],
+  "pr": 123
+}
+```
+
+`section` must be one of the ids in `sections`. `settings` lists the keys the
+entry mentions; `test_features.py` checks each one exists in
+`assets/settings/default.json`, so a renamed or mistyped setting fails CI.
+`.gitea/workflows/features-check.yml` runs it on pull requests that touch this
+directory or the default settings.
