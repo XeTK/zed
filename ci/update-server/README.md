@@ -6,6 +6,7 @@ The signed update feed, builds and landing page for the xetk fork of Zed.
 |---|---|
 | `publish.sh` | Pushes a signed build to the host over rsync. Called by `.gitea/workflows/build-mac.yml` on main and tags. |
 | `index.html` | The landing page; reads each platform's `latest.json` and lists the platforms that have one, the visitor's first. Published with every build. |
+| `features.html` | A static page describing what the fork adds and how to enable each feature. Update it when a feature lands. Published with every build. |
 
 ## How a build gets there
 
@@ -22,6 +23,7 @@ Layout on the host:
 
 ```
 index.html
+features.html
 <channel>/latest.json                                 legacy, see below
 <channel>/<os>-<arch>/latest.json                     the signed feed
 <channel>/<os>-<arch>/Zed-xetk-<channel>-<run>-<arch>.<ext>   one immutable file per build

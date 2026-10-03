@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Features - Zed xetk</title>
+<style>
+  :root { color-scheme: light dark; --muted: #6b7280; --card: rgba(127,127,127,.08); --line: rgba(127,127,127,.25); --accent: #3b82f6; }
+  body { font: 16px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 44rem; margin: 3rem auto; padding: 0 1.25rem; }
+  h1 { margin: 0 0 .25rem; }
+  .lede { color: var(--muted); margin-top: 0; }
+  .channel { background: var(--card); border: 1px solid var(--line); border-radius: .75rem; padding: 1rem 1.25rem; margin: 1.25rem 0; }
+  .channel h3 { margin: 0 0 .25rem; font-size: 1.1rem; }
+  .meta { color: var(--muted); font-size: .9rem; word-break: break-all; }
+  a.button { display: inline-block; margin-top: .6rem; padding: .45rem .9rem; border-radius: .5rem; background: var(--accent); color: #fff; text-decoration: none; font-weight: 600; }
+  code, pre { font: .9em ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--card); border-radius: .35rem; }
+  code { padding: .1rem .3rem; }
+  pre { padding: .75rem 1rem; overflow-x: auto; }
+</style>
+</head>
+<body>
+<p><a href="./">&larr; Downloads</a></p>
+<h1>What this build adds</h1>
+<p class="lede">Everything here is on top of upstream Zed. Settings go in your user <code>settings.json</code> (<code>cmd-,</code>) unless it says project, and most also appear in the settings UI.</p>
+
+<h2>Projects and windows</h2>
+
+<div class="channel">
+<h3>Window accent color per project</h3>
+<p class="meta">Tint a project's title bar so windows are easy to tell apart.</p>
+<p>Add a hex color to the project's <code>.zed/settings.json</code>, or set it in the settings UI:</p>
+<pre>{ "window_accent_color": "#3b82f6" }</pre>
+<p>The project's name in the sidebar gets the same color, with text that stays readable on it. Unset means the normal theme title bar.</p>
+</div>
+
+<div class="channel">
+<h3>Next and previous project</h3>
+<p class="meta">Switch between the projects in a window from the keyboard.</p>
+<p><code>cmd-alt-]</code> and <code>cmd-alt-[</code> on macOS, <code>ctrl-alt-]</code> and <code>ctrl-alt-[</code> on Linux and Windows. The actions are <code>multi_workspace::NextProject</code> and <code>PreviousProject</code>.</p>
+</div>
+
+<div class="channel">
+<h3>Reorder projects in the sidebar</h3>
+<p>Drag a project's header row up or down in the sidebar to reorder the projects.</p>
+</div>
+
+<h2>Agent panel</h2>
+
+<div class="channel">
+<h3>Message timestamps</h3>
+<p class="meta">When each message was sent. Saved with Zed agent threads.</p>
+<p>Hover a message to see its time, and hover the time for the full date. To always show it:</p>
+<pre>{ "agent": { "message_timestamps": "always" } }</pre>
+<p>Values are <code>"on_hover"</code> (default) and <code>"always"</code>. Threads saved before this feature, and history loaded from external agents, show no time.</p>
+</div>
+
+<div class="channel">
+<h3>Elapsed time on tool calls</h3>
+<p>Every running tool call shows how long it has been running once it passes a second, not only terminal commands. No setting.</p>
+</div>
+
+<div class="channel">
+<h3>Threads as tabs</h3>
+<p class="meta">Move a conversation out of the panel into the editor area.</p>
+<ul>
+<li>Thread menu in the panel: <b>Move Thread to New Tab</b> hands the active thread to a tab and gives the panel a fresh thread.</li>
+<li>Thread menu: <b>New Thread in Tab</b> starts a new thread directly in a tab.</li>
+<li>Right-click a thread in the sidebar: <b>Open Thread in Tab</b>.</li>
+</ul>
+<p>Tabs behave like any other tab: reorder, drag between panes, split. They come back after a restart.</p>
+</div>
+
+<div class="channel">
+<h3>Unsent draft flag</h3>
+<p>A thread whose message box holds unsent text shows a pencil icon in the sidebar. The text is kept across restarts. No setting.</p>
+</div>
+
+<div class="channel">
+<h3>Expand image cards</h3>
+<p class="meta">Off by default.</p>
+<p>Tool call cards that return an image, such as a screenshot, expand on their own the first time the image arrives:</p>
+<pre>{ "agent": { "expand_image_card": true } }</pre>
+<p>If you collapse the card again it stays collapsed.</p>
+</div>
+
+<div class="channel">
+<h3>Archive search</h3>
+<p>The threads archive matches and highlights the title shown on screen, including titles you renamed.</p>
+</div>
+
+<h2>Stability and performance</h2>
+
+<div class="channel">
+<h3>Child processes are cleaned up</h3>
+<p>MCP context servers and external agents are killed along with everything they started, including processes that detached from them, when they are dropped and when Zed quits. Before, some could be left running after Zed exited.</p>
+</div>
+
+<div class="channel">
+<h3>Smaller fixes</h3>
+<p>Releasing UI focus handles and recomputing bracket colors no longer do needless work on every frame or theme change.</p>
+</div>
+
+<h2>Updates</h2>
+
+<div class="channel">
+<h3>Signed updates from this site</h3>
+<p>The app checks <code>zed.xetk.co.uk</code> for a new build and installs it only if the Ed25519 signature and the SHA-256 checksum match. It has its own name and bundle id, so it can sit next to an official Zed. Nightly builds follow every change to main; stable follows tagged releases.</p>
+</div>
+
+</body>
+</html>
