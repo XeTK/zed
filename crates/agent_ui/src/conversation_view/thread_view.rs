@@ -1308,6 +1308,13 @@ impl ThreadView {
                     });
                 }
             }
+            ViewEvent::NewImage(tool_call_id) => {
+                if AgentSettings::get_global(cx).expand_image_card {
+                    self.entry_view_state.update(cx, |state, _cx| {
+                        state.expand_tool_call(tool_call_id.clone());
+                    });
+                }
+            }
             ViewEvent::TerminalMovedToBackground(tool_call_id) => {
                 self.entry_view_state.update(cx, |state, _cx| {
                     state.collapse_tool_call(tool_call_id);
