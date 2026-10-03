@@ -21,91 +21,63 @@
 <body>
 <p><a href="./">&larr; Downloads</a></p>
 <h1>What this build adds</h1>
-<p class="lede">Everything here is on top of upstream Zed. Settings go in your user <code>settings.json</code> (<code>cmd-,</code>) unless it says project, and most also appear in the settings UI.</p>
+<div id="features"><p class="meta">Loading...</p></div>
 
-<h2>Projects and windows</h2>
+<script>
+  function element(tag, className, text) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  }
 
-<div class="channel">
-<h3>Window accent color per project</h3>
-<p class="meta">Tint a project's title bar so windows are easy to tell apart.</p>
-<p>Add a hex color to the project's <code>.zed/settings.json</code>, or set it in the settings UI:</p>
-<pre>{ "window_accent_color": "#3b82f6" }</pre>
-<p>The project's name in the sidebar gets the same color, with text that stays readable on it. Unset means the normal theme title bar.</p>
-</div>
+  // Text from features.json is untrusted-shaped: build it with textContent,
+  // never innerHTML. `code` renders as <code> and **bold** as <b>.
+  function inline(parent, text) {
+    text.split(/(`[^`]+`|\*\*[^*]+\*\*)/).forEach(part => {
+      if (part.startsWith("`") && part.endsWith("`") && part.length > 2) {
+        parent.appendChild(element("code", "", part.slice(1, -1)));
+      } else if (part.startsWith("**") && part.endsWith("**") && part.length > 4) {
+        parent.appendChild(element("b", "", part.slice(2, -2)));
+      } else if (part) {
+        parent.appendChild(document.createTextNode(part));
+      }
+    });
+    return parent;
+  }
 
-<div class="channel">
-<h3>Next and previous project</h3>
-<p class="meta">Switch between the projects in a window from the keyboard.</p>
-<p><code>cmd-alt-]</code> and <code>cmd-alt-[</code> on macOS, <code>ctrl-alt-]</code> and <code>ctrl-alt-[</code> on Linux and Windows. The actions are <code>multi_workspace::NextProject</code> and <code>PreviousProject</code>.</p>
-</div>
+  function card(feature) {
+    const box = element("div", "channel");
+    box.appendChild(element("h3", "", feature.title));
+    if (feature.summary) box.appendChild(element("p", "meta", feature.summary));
+    const items = feature.details.filter(line => line);
+    if (items.length > 1 && items.every(line => line.length < 160)) {
+      const list = element("ul");
+      items.forEach(line => list.appendChild(inline(element("li"), line)));
+      box.appendChild(list);
+    } else {
+      items.forEach(line => box.appendChild(inline(element("p"), line)));
+    }
+    if (feature.example) box.appendChild(element("pre", "", feature.example));
+    return box;
+  }
 
-<div class="channel">
-<h3>Reorder projects in the sidebar</h3>
-<p>Drag a project's header row up or down in the sidebar to reorder the projects.</p>
-</div>
-
-<h2>Agent panel</h2>
-
-<div class="channel">
-<h3>Message timestamps</h3>
-<p class="meta">When each message was sent. Saved with Zed agent threads.</p>
-<p>Hover a message to see its time, and hover the time for the full date. To always show it:</p>
-<pre>{ "agent": { "message_timestamps": "always" } }</pre>
-<p>Values are <code>"on_hover"</code> (default) and <code>"always"</code>. Threads saved before this feature, and history loaded from external agents, show no time.</p>
-</div>
-
-<div class="channel">
-<h3>Elapsed time on tool calls</h3>
-<p>Every running tool call shows how long it has been running once it passes a second, not only terminal commands. No setting.</p>
-</div>
-
-<div class="channel">
-<h3>Threads as tabs</h3>
-<p class="meta">Move a conversation out of the panel into the editor area.</p>
-<ul>
-<li>Thread menu in the panel: <b>Move Thread to New Tab</b> hands the active thread to a tab and gives the panel a fresh thread.</li>
-<li>Thread menu: <b>New Thread in Tab</b> starts a new thread directly in a tab.</li>
-<li>Right-click a thread in the sidebar: <b>Open Thread in Tab</b>.</li>
-</ul>
-<p>Tabs behave like any other tab: reorder, drag between panes, split. They come back after a restart.</p>
-</div>
-
-<div class="channel">
-<h3>Unsent draft flag</h3>
-<p>A thread whose message box holds unsent text shows a pencil icon in the sidebar. The text is kept across restarts. No setting.</p>
-</div>
-
-<div class="channel">
-<h3>Expand image cards</h3>
-<p class="meta">Off by default.</p>
-<p>Tool call cards that return an image, such as a screenshot, expand on their own the first time the image arrives:</p>
-<pre>{ "agent": { "expand_image_card": true } }</pre>
-<p>If you collapse the card again it stays collapsed.</p>
-</div>
-
-<div class="channel">
-<h3>Archive search</h3>
-<p>The threads archive matches and highlights the title shown on screen, including titles you renamed.</p>
-</div>
-
-<h2>Stability and performance</h2>
-
-<div class="channel">
-<h3>Child processes are cleaned up</h3>
-<p>MCP context servers and external agents are killed along with everything they started, including processes that detached from them, when they are dropped and when Zed quits. Before, some could be left running after Zed exited.</p>
-</div>
-
-<div class="channel">
-<h3>Smaller fixes</h3>
-<p>Releasing UI focus handles and recomputing bracket colors no longer do needless work on every frame or theme change.</p>
-</div>
-
-<h2>Updates</h2>
-
-<div class="channel">
-<h3>Signed updates from this site</h3>
-<p>The app checks <code>zed.xetk.co.uk</code> for a new build and installs it only if the Ed25519 signature and the SHA-256 checksum match. It has its own name and bundle id, so it can sit next to an official Zed. Nightly builds follow every change to main; stable follows tagged releases.</p>
-</div>
-
+  fetch("features.json", { cache: "no-store" })
+    .then(response => { if (!response.ok) throw new Error(response.status); return response.json(); })
+    .then(data => {
+      const container = document.getElementById("features");
+      container.textContent = "";
+      if (data.intro) container.appendChild(inline(element("p", "lede"), data.intro));
+      data.sections.forEach(section => {
+        const features = data.features.filter(feature => feature.section === section.id);
+        if (features.length === 0) return;
+        container.appendChild(element("h2", "", section.title));
+        features.forEach(feature => container.appendChild(card(feature)));
+      });
+    })
+    .catch(() => {
+      document.getElementById("features").textContent = "Could not load the feature list.";
+    });
+</script>
 </body>
 </html>
