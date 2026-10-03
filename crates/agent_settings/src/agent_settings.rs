@@ -242,6 +242,7 @@ pub struct AgentSettings {
     pub enable_feedback: bool,
     pub expand_edit_card: bool,
     pub expand_terminal_card: bool,
+    pub expand_image_card: bool,
     pub terminal_init_command: Option<String>,
     pub thinking_display: ThinkingBlockDisplay,
     pub message_timestamps: MessageTimestamps,
@@ -826,6 +827,7 @@ impl Settings for AgentSettings {
             enable_feedback: agent.enable_feedback.unwrap(),
             expand_edit_card: agent.expand_edit_card.unwrap(),
             expand_terminal_card: agent.expand_terminal_card.unwrap(),
+            expand_image_card: agent.expand_image_card.unwrap(),
             terminal_init_command: agent
                 .terminal_init_command
                 .filter(|command| !command.trim().is_empty()),

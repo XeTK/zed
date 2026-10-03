@@ -1352,6 +1352,10 @@
     //
     // Default: true
     "expand_terminal_card": true,
+    // Whether to have tool call cards in the agent panel expand automatically when they return an image.
+    //
+    // Default: false
+    "expand_image_card": false,
     // Command to automatically run when Zed creates a Terminal Thread shell in the agent panel.
     // The command is sent to the shell as if typed, so it is interpreted by your
     // configured shell (including on Windows and remote/WSL projects).
