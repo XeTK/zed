@@ -1,0 +1,48 @@
+# Mirrors main to github.com/XeTK/zed. Gitea is the source of truth: nothing is
+# pulled back from GitHub, and GitHub's main is overwritten on every push.
+#
+# Same approach as xetk/homebrew-zed's mirror: a deploy key scoped to that one
+# GitHub repo (secret MIRROR_DEPLOY_KEY), pushed over ssh.github.com:443 from
+# linux-x86 so it does not queue behind builds on the single Mac runner.
+# GitHub Actions is turned off on XeTK/zed, so upstream's workflows in
+# .github/ do not run there when this pushes.
+name: mirror-to-github
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+concurrency:
+  group: mirror-to-github
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    runs-on: linux-x86
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Push main to GitHub
+        env:
+          MIRROR_DEPLOY_KEY: ${{ secrets.MIRROR_DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          [ -n "${MIRROR_DEPLOY_KEY}" ] || { echo "MIRROR_DEPLOY_KEY is not set"; exit 1; }
+          umask 077
+          key="$(mktemp)"; known_hosts="$(mktemp)"
+          trap 'rm -f "${key}" "${known_hosts}"' EXIT
+          printf '%s\n' "${MIRROR_DEPLOY_KEY}" > "${key}"
+          # GitHub's host keys, fetched from its own API over TLS rather than scanned.
+          curl -fsS https://api.github.com/meta | python3 -c \
+            'import json,sys; [print("[ssh.github.com]:443 "+k) for k in json.load(sys.stdin)["ssh_keys"]]' > "${known_hosts}"
+          [ -s "${known_hosts}" ] || { echo "could not fetch GitHub host keys"; exit 1; }
+          export GIT_SSH_COMMAND="ssh -i ${key} -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=${known_hosts}"
+          # Always push Gitea's main (not HEAD), so a manual run from another
+          # branch can never publish that branch as GitHub's main.
+          git push --force "ssh://git@ssh.github.com:443/XeTK/zed.git" "refs/remotes/origin/main:refs/heads/main"
+          echo "mirrored $(git rev-parse --short origin/main) to github.com/XeTK/zed"
