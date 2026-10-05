@@ -55,11 +55,14 @@
     return fetch(channel.id + "/" + platform.id + "/latest.json", { cache: "no-store" })
       .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })
       .then(feed => {
-        const sha = (feed.version.split(".").pop() || "").slice(0, 7);
-        const base = feed.version.split("+")[0];
+        // feed.version is "<cargo version>+<channel>.<run>.<sha>". The cargo
+        // version rarely changes, so show the run number as the build number.
+        const [base, build = ""] = feed.version.split("+");
+        const [, run, commit = ""] = build.split(".");
+        const sha = commit.slice(0, 7);
         const box = element("div", "channel");
         box.appendChild(element("h3", "", channel.label));
-        box.appendChild(element("p", "meta", channel.about + " " + base + (sha ? " (" + sha + ")" : "")));
+        box.appendChild(element("p", "meta", channel.about + " " + base + (run ? " build " + run : "") + (sha ? " (" + sha + ")" : "")));
         box.appendChild(element("p", "meta", "sha256 " + feed.sha256));
         const link = element("a", "button", "Download");
         link.href = feed.url;
