@@ -12502,6 +12502,118 @@ async fn test_startup_successful_restoration_no_spurious_draft(cx: &mut TestAppC
 }
 
 #[gpui::test]
+async fn test_project_header_title_click_switches_and_rest_collapses(cx: &mut TestAppContext) {
+    let project_a = init_test_project_with_agent_panel("/project-a", cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a.clone(), window, cx));
+    let (sidebar, _panel_a) = setup_sidebar_with_agent_panel(&multi_workspace, cx);
+
+    let fs = cx.update(|_window, cx| <dyn fs::Fs>::global(cx));
+    fs.as_fake()
+        .insert_tree("/project-b", serde_json::json!({ "src": {} }))
+        .await;
+    let project_b =
+        project::Project::test(fs.clone() as Arc<dyn Fs>, ["/project-b".as_ref()], cx).await;
+    let workspace_b = multi_workspace.update_in(cx, |mw, window, cx| {
+        mw.test_add_workspace(project_b.clone(), window, cx)
+    });
+    let _panel_b = add_agent_panel(&workspace_b, cx);
+    cx.run_until_parked();
+
+    let active_is_a = |cx: &mut gpui::VisualTestContext| {
+        multi_workspace.read_with(cx, |mw, cx| {
+            mw.workspace()
+                .read(cx)
+                .project()
+                .read(cx)
+                .visible_worktrees(cx)
+                .any(|worktree| {
+                    worktree
+                        .read(cx)
+                        .abs_path()
+                        .to_string_lossy()
+                        .contains("project-a")
+                })
+        })
+    };
+    assert!(
+        !active_is_a(cx),
+        "project-b should be active after adding it"
+    );
+
+    let header_ix_for_a = |cx: &mut gpui::VisualTestContext| {
+        sidebar.read_with(cx, |sidebar, _| {
+            sidebar
+                .contents
+                .entries
+                .iter()
+                .position(|entry| {
+                    matches!(entry, ListEntry::ProjectHeader { label, .. } if label.contains("project-a"))
+                })
+                .expect("project-a should have a header")
+        })
+    };
+    let header_bounds = |ix: usize, cx: &mut gpui::VisualTestContext| {
+        cx.draw(
+            gpui::point(px(0.), px(0.)),
+            gpui::size(px(400.), px(400.)),
+            |_, _| sidebar.clone().into_any_element(),
+        );
+        sidebar.read_with(cx, |sidebar, _| {
+            sidebar
+                .list_state
+                .bounds_for_item(ix)
+                .expect("the header should be measured")
+        })
+    };
+    let collapsed_a = |cx: &mut gpui::VisualTestContext| {
+        sidebar.read_with(cx, |sidebar, cx| {
+            let key = sidebar
+                .contents
+                .entries
+                .iter()
+                .find_map(|entry| match entry {
+                    ListEntry::ProjectHeader { key, label, .. } if label.contains("project-a") => {
+                        Some(key.clone())
+                    }
+                    _ => None,
+                })
+                .expect("project-a should have a header");
+            sidebar.is_group_collapsed(&key, cx)
+        })
+    };
+
+    // The title sits at the start of the header row.
+    let bounds = header_bounds(header_ix_for_a(cx), cx);
+    cx.simulate_click(
+        gpui::point(bounds.left() + px(30.), bounds.top() + px(14.)),
+        gpui::Modifiers::none(),
+    );
+    cx.run_until_parked();
+    assert!(
+        active_is_a(cx),
+        "clicking the title switches to the project"
+    );
+    assert!(!collapsed_a(cx), "clicking the title does not collapse it");
+
+    // The space to the right of the title collapses the group instead.
+    let bounds = header_bounds(header_ix_for_a(cx), cx);
+    cx.simulate_click(
+        gpui::point(bounds.left() + px(200.), bounds.top() + px(14.)),
+        gpui::Modifiers::none(),
+    );
+    cx.run_until_parked();
+    assert!(
+        collapsed_a(cx),
+        "clicking beside the title collapses the group"
+    );
+    assert!(
+        active_is_a(cx),
+        "collapsing does not change the active project"
+    );
+}
+
+#[gpui::test]
 async fn test_project_header_click_restores_last_viewed(cx: &mut TestAppContext) {
     // Rule 9: Clicking a project header should restore whatever the
     // user was last looking at in that group, not create new drafts

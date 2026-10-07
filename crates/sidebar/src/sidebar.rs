@@ -2412,6 +2412,20 @@ impl Sidebar {
                 .into_any_element(),
             None => label,
         };
+        // Clicking the project's name switches to it; clicking the rest of the
+        // header collapses or expands its threads.
+        let label = div()
+            .id(SharedString::from(format!("{id_prefix}project-title-{ix}")))
+            .min_w_0()
+            .child(label)
+            .on_click(cx.listener({
+                let key = key.clone();
+                move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.activate_or_open_workspace_for_group(&key, window, cx);
+                }
+            }))
+            .into_any_element();
 
         let color = cx.theme().colors();
         let sidebar_base_bg = color
