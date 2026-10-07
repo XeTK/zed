@@ -72,6 +72,9 @@ use workspace::{
 };
 
 use git_ui_core::worktree_service::{RemoteBranchName, worktree_create_targets};
+
+const ARCHIVE_STALE_THREADS_FIRST_DELAY: std::time::Duration = std::time::Duration::from_secs(60);
+const ARCHIVE_STALE_THREADS_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 use zed_actions::editor::{MoveDown, MoveUp};
 use zed_actions::{CreateWorktree, NewWorktreeBranchTarget, OpenRecent};
 
@@ -858,6 +861,7 @@ pub struct Sidebar {
     project_header_menu_ix: Option<usize>,
     worktree_default_branches: HashMap<ProjectGroupKey, DefaultBranchCache>,
     _subscriptions: Vec<gpui::Subscription>,
+    _archive_stale_threads_task: Task<()>,
     _draft_editor_observations: Vec<gpui::Subscription>,
     update_task: Option<Task<()>>,
     /// For the thread import banners, if there is just one we show "Import
@@ -1007,6 +1011,7 @@ impl Sidebar {
             project_header_menu_ix: None,
             worktree_default_branches: HashMap::new(),
             _subscriptions: Vec::new(),
+            _archive_stale_threads_task: Self::spawn_archive_stale_threads_task(cx),
             _draft_editor_observations: Vec::new(),
             update_task: None,
             import_banners_use_verbose_labels: None,
@@ -1016,6 +1021,74 @@ impl Sidebar {
 
     fn serialize(&mut self, cx: &mut Context<Self>) {
         cx.emit(workspace::SidebarEvent::SerializeNeeded);
+    }
+
+    fn spawn_archive_stale_threads_task(cx: &mut Context<Self>) -> Task<()> {
+        cx.spawn(async move |this, cx| {
+            // Give the panels time to load their open threads first, so a
+            // thread that is open but old is recognised as live.
+            cx.background_executor()
+                .timer(ARCHIVE_STALE_THREADS_FIRST_DELAY)
+                .await;
+            loop {
+                if this
+                    .update(cx, |this, cx| this.archive_stale_threads(Utc::now(), cx))
+                    .is_err()
+                {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(ARCHIVE_STALE_THREADS_INTERVAL)
+                    .await;
+            }
+        })
+    }
+
+    /// Archives threads not updated for `threads_sidebar_archive_after_days`.
+    /// Only the archived flag is set, so they can be restored from the archive;
+    /// unlike archiving by hand, no worktree is removed. Threads that are live,
+    /// active, unread or hold an unsent draft are left alone.
+    pub(crate) fn archive_stale_threads(
+        &mut self,
+        now: DateTime<Utc>,
+        cx: &mut Context<Self>,
+    ) -> usize {
+        let archive_after_days = AgentSettings::get_global(cx).threads_sidebar_archive_after_days;
+        if archive_after_days == 0 {
+            return 0;
+        }
+        let cutoff = now - chrono::Duration::days(i64::from(archive_after_days));
+        let live_session_ids: HashSet<&acp::SessionId> = self.live_thread_statuses.keys().collect();
+        let store = ThreadMetadataStore::global(cx);
+        let stale_thread_ids: Vec<ThreadId> = store
+            .read(cx)
+            .entries()
+            .filter(|metadata| {
+                !metadata.archived
+                    && metadata
+                        .session_id
+                        .as_ref()
+                        .is_some_and(|session_id| !live_session_ids.contains(session_id))
+                    && Self::thread_display_time(metadata) < cutoff
+                    && !self
+                        .active_entry
+                        .as_ref()
+                        .is_some_and(|entry| entry.is_active_thread(&metadata.thread_id))
+                    && !self.contents.is_thread_notified(&metadata.thread_id)
+                    && agent_ui::draft_prompt_store::read(metadata.thread_id, cx).is_none()
+            })
+            .map(|metadata| metadata.thread_id)
+            .collect();
+        if stale_thread_ids.is_empty() {
+            return 0;
+        }
+        store.update(cx, |store, cx| {
+            for thread_id in &stale_thread_ids {
+                store.archive(*thread_id, None, cx);
+            }
+        });
+        self.update_entries(cx);
+        stale_thread_ids.len()
     }
 
     fn is_group_collapsed(&self, key: &ProjectGroupKey, cx: &App) -> bool {

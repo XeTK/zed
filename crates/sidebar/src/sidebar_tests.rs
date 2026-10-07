@@ -935,6 +935,104 @@ async fn test_threads_needing_attention_stay_visible_past_the_limit(cx: &mut Tes
     );
 }
 
+fn set_archive_after_days(days: u32, cx: &mut gpui::VisualTestContext) {
+    cx.update(|_, cx| {
+        AgentSettings::override_global(
+            AgentSettings {
+                threads_sidebar_archive_after_days: days,
+                ..AgentSettings::get_global(cx).clone()
+            },
+            cx,
+        );
+    });
+}
+
+fn is_archived(session: &str, cx: &mut gpui::VisualTestContext) -> bool {
+    cx.update(|_, cx| {
+        ThreadMetadataStore::global(cx)
+            .read(cx)
+            .entry_by_session(&acp::SessionId::new(Arc::from(session)))
+            .map(|metadata| metadata.archived)
+            .expect("thread should be saved")
+    })
+}
+
+#[gpui::test]
+async fn test_stale_threads_are_archived_after_the_configured_days(cx: &mut TestAppContext) {
+    let project = init_test_project("/my-project", cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let sidebar = setup_sidebar(&multi_workspace, cx);
+
+    // thread-0..thread-2 were last updated in 2024.
+    save_n_test_threads(3, &project, cx).await;
+    let now = chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 3, 1, 0, 0, 0).unwrap();
+    save_thread_metadata(
+        acp::SessionId::new(Arc::from("recent")),
+        Some("Recent".into()),
+        now - chrono::Duration::days(2),
+        None,
+        None,
+        &project,
+        cx,
+    );
+    cx.run_until_parked();
+
+    // Off by default.
+    let archived = sidebar.update(cx, |sidebar, cx| sidebar.archive_stale_threads(now, cx));
+    assert_eq!(archived, 0);
+    assert!(!is_archived("thread-0", cx));
+
+    set_archive_after_days(30, cx);
+    let archived = sidebar.update(cx, |sidebar, cx| sidebar.archive_stale_threads(now, cx));
+    cx.run_until_parked();
+    assert_eq!(archived, 3);
+    for session in ["thread-0", "thread-1", "thread-2"] {
+        assert!(is_archived(session, cx), "{session} is older than 30 days");
+    }
+    assert!(
+        !is_archived("recent", cx),
+        "a thread updated 2 days ago stays"
+    );
+    assert_eq!(
+        visible_entries_as_strings(&sidebar, cx),
+        vec!["v [my-project]", "  Recent"]
+    );
+
+    // A second pass finds nothing new.
+    let archived = sidebar.update(cx, |sidebar, cx| sidebar.archive_stale_threads(now, cx));
+    assert_eq!(archived, 0);
+}
+
+#[gpui::test]
+async fn test_unread_threads_are_not_archived(cx: &mut TestAppContext) {
+    let project = init_test_project("/my-project", cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let sidebar = setup_sidebar(&multi_workspace, cx);
+
+    save_n_test_threads(2, &project, cx).await;
+    cx.run_until_parked();
+    let unread_thread_id = cx.update(|_, cx| {
+        ThreadMetadataStore::global(cx)
+            .read(cx)
+            .entry_by_session(&acp::SessionId::new(Arc::from("thread-0")))
+            .map(|metadata| metadata.thread_id)
+            .expect("thread-0 should be saved")
+    });
+    sidebar.update(cx, |sidebar, cx| {
+        sidebar.contents.notified_threads.insert(unread_thread_id);
+        sidebar.update_entries(cx);
+    });
+
+    set_archive_after_days(30, cx);
+    let now = chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 3, 1, 0, 0, 0).unwrap();
+    sidebar.update(cx, |sidebar, cx| sidebar.archive_stale_threads(now, cx));
+    cx.run_until_parked();
+    assert!(!is_archived("thread-0", cx), "unread threads are kept");
+    assert!(is_archived("thread-1", cx));
+}
+
 #[gpui::test]
 async fn test_collapse_changes_entry_shape(cx: &mut TestAppContext) {
     let project = init_test_project("/my-project", cx).await;
