@@ -203,6 +203,7 @@ fn assert_remote_project_integration_sidebar_state(
                     terminal.metadata.title
                 );
             }
+            ListEntry::ShowMore { .. } => {}
         }
     }
 
@@ -689,6 +690,17 @@ fn visible_entries_as_strings(
                         let worktree = format_linked_worktree_chips(&terminal.worktrees);
                         format!("  {title}{worktree}{selected}")
                     }
+                    ListEntry::ShowMore {
+                        hidden_count,
+                        is_expanded,
+                        ..
+                    } => {
+                        if *is_expanded {
+                            format!("  [Show fewer]{selected}")
+                        } else {
+                            format!("  [Show {hidden_count} more]{selected}")
+                        }
+                    }
                 }
             })
             .collect()
@@ -806,6 +818,120 @@ async fn test_thread_status_update_does_not_reset_list_measurements(cx: &mut Tes
     assert_eq!(
         before, after,
         "a no-op rebuild should produce an identical shape sequence"
+    );
+}
+
+#[gpui::test]
+async fn test_long_thread_lists_show_the_newest_and_a_show_more_row(cx: &mut TestAppContext) {
+    let project = init_test_project("/my-project", cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let sidebar = setup_sidebar(&multi_workspace, cx);
+
+    save_n_test_threads(7, &project, cx).await;
+    cx.run_until_parked();
+
+    // Default limit is 5; Thread 7 is the newest.
+    assert_eq!(
+        visible_entries_as_strings(&sidebar, cx),
+        vec![
+            "v [my-project]",
+            "  Thread 7",
+            "  Thread 6",
+            "  Thread 5",
+            "  Thread 4",
+            "  Thread 3",
+            "  [Show 2 more]",
+        ]
+    );
+
+    let project_group_key = project.read_with(cx, |project, cx| project.project_group_key(cx));
+    sidebar.update(cx, |sidebar, cx| {
+        sidebar.toggle_thread_list_expanded(&project_group_key, cx);
+    });
+    cx.run_until_parked();
+    let expanded = visible_entries_as_strings(&sidebar, cx);
+    assert_eq!(
+        expanded.len(),
+        9,
+        "all seven threads and Show fewer: {expanded:?}"
+    );
+    assert_eq!(expanded.last().map(String::as_str), Some("  [Show fewer]"));
+
+    sidebar.update(cx, |sidebar, cx| {
+        sidebar.toggle_thread_list_expanded(&project_group_key, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        visible_entries_as_strings(&sidebar, cx)
+            .last()
+            .map(String::as_str),
+        Some("  [Show 2 more]")
+    );
+}
+
+#[gpui::test]
+async fn test_thread_list_limit_can_be_turned_off(cx: &mut TestAppContext) {
+    let project = init_test_project("/my-project", cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let sidebar = setup_sidebar(&multi_workspace, cx);
+    cx.update(|_, cx| {
+        AgentSettings::override_global(
+            AgentSettings {
+                threads_sidebar_visible_threads: 0,
+                ..AgentSettings::get_global(cx).clone()
+            },
+            cx,
+        );
+    });
+
+    save_n_test_threads(7, &project, cx).await;
+    cx.run_until_parked();
+    let entries = visible_entries_as_strings(&sidebar, cx);
+    assert_eq!(
+        entries.len(),
+        8,
+        "every thread, no Show more row: {entries:?}"
+    );
+}
+
+#[gpui::test]
+async fn test_threads_needing_attention_stay_visible_past_the_limit(cx: &mut TestAppContext) {
+    let project = init_test_project("/my-project", cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let sidebar = setup_sidebar(&multi_workspace, cx);
+
+    save_n_test_threads(7, &project, cx).await;
+    cx.run_until_parked();
+
+    // Thread 1 is the oldest, so it would be hidden, but it is unread.
+    let oldest_thread_id = sidebar.read_with(cx, |_, cx| {
+        ThreadMetadataStore::global(cx)
+            .read(cx)
+            .entry_by_session(&acp::SessionId::new(Arc::from("thread-0")))
+            .map(|metadata| metadata.thread_id)
+            .expect("thread-0 should be saved")
+    });
+    sidebar.update(cx, |sidebar, cx| {
+        sidebar.contents.notified_threads.insert(oldest_thread_id);
+        sidebar.update_entries(cx);
+    });
+    cx.run_until_parked();
+
+    assert_eq!(
+        visible_entries_as_strings(&sidebar, cx),
+        vec![
+            "v [my-project]",
+            "  Thread 7",
+            "  Thread 6",
+            "  Thread 5",
+            "  Thread 4",
+            "  Thread 3",
+            "  Thread 1 (!)",
+            "  [Show 1 more]",
+        ]
     );
 }
 
@@ -5646,7 +5772,9 @@ async fn test_rename_thread_from_sidebar_updates_title_override(cx: &mut TestApp
                     thread.metadata.thread_id,
                     thread.metadata.display_title(),
                 )),
-                ListEntry::ProjectHeader { .. } | ListEntry::Terminal(_) => None,
+                ListEntry::ProjectHeader { .. }
+                | ListEntry::Terminal(_)
+                | ListEntry::ShowMore { .. } => None,
             })
             .expect("sidebar should have a thread entry")
     });
@@ -5732,7 +5860,9 @@ async fn test_rename_thread_from_sidebar_updates_title_override(cx: &mut TestApp
             .iter()
             .find_map(|entry| match entry {
                 ListEntry::Thread(thread) => Some(thread),
-                ListEntry::ProjectHeader { .. } | ListEntry::Terminal(_) => None,
+                ListEntry::ProjectHeader { .. }
+                | ListEntry::Terminal(_)
+                | ListEntry::ShowMore { .. } => None,
             })
             .expect("renamed thread should match the search");
         let title = thread.metadata.display_title();
@@ -5771,7 +5901,9 @@ async fn test_rename_selected_thread_action_renames_selected_thread(cx: &mut Tes
             .enumerate()
             .find_map(|(ix, entry)| match entry {
                 ListEntry::Thread(thread) => Some((ix, thread.metadata.thread_id)),
-                ListEntry::ProjectHeader { .. } | ListEntry::Terminal(_) => None,
+                ListEntry::ProjectHeader { .. }
+                | ListEntry::Terminal(_)
+                | ListEntry::ShowMore { .. } => None,
             })
             .expect("sidebar should have a thread entry")
     });
@@ -7939,6 +8071,7 @@ async fn test_clicking_worktree_thread_does_not_briefly_render_as_separate_proje
                         terminal.metadata.title
                     );
                 }
+                ListEntry::ShowMore { .. } => {}
             }
         }
 

@@ -433,6 +433,13 @@ enum ListEntry {
     },
     Thread(Arc<ThreadEntry>),
     Terminal(TerminalEntry),
+    /// Follows a project's threads when some are hidden by
+    /// `threads_sidebar_visible_threads`, or when they have been revealed.
+    ShowMore {
+        key: ProjectGroupKey,
+        hidden_count: usize,
+        is_expanded: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -452,7 +459,7 @@ impl RenameTarget {
                 Self::Terminal(terminal.metadata.terminal_id),
                 terminal.metadata.editable_title(),
             )),
-            ListEntry::ProjectHeader { .. } => None,
+            ListEntry::ProjectHeader { .. } | ListEntry::ShowMore { .. } => None,
         }
     }
 }
@@ -478,7 +485,7 @@ impl ActivatableEntry {
                 metadata: terminal.metadata.clone(),
                 workspace: terminal.workspace.clone(),
             }),
-            ListEntry::ProjectHeader { .. } => None,
+            ListEntry::ProjectHeader { .. } | ListEntry::ShowMore { .. } => None,
         }
     }
 }
@@ -488,7 +495,9 @@ impl ListEntry {
     fn session_id(&self) -> Option<&acp::SessionId> {
         match self {
             ListEntry::Thread(thread_entry) => thread_entry.metadata.session_id.as_ref(),
-            ListEntry::Terminal(_) | ListEntry::ProjectHeader { .. } => None,
+            ListEntry::Terminal(_)
+            | ListEntry::ProjectHeader { .. }
+            | ListEntry::ShowMore { .. } => None,
         }
     }
 
@@ -509,6 +518,7 @@ impl ListEntry {
             ListEntry::ProjectHeader { key, .. } => {
                 multi_workspace.workspaces_for_project_group(key, cx)
             }
+            ListEntry::ShowMore { .. } => Vec::new(),
         }
     }
 }
@@ -549,6 +559,11 @@ enum EntryShape {
     },
     Thread(ThreadId),
     Terminal(TerminalId),
+    ShowMore {
+        key: ProjectGroupKey,
+        hidden_count: usize,
+        is_expanded: bool,
+    },
 }
 
 impl SidebarContents {
@@ -821,6 +836,8 @@ pub struct Sidebar {
     /// thread, confirming in the thread switcher, etc.) — never from
     /// background data changes. Used to sort the thread switcher popup.
     thread_last_accessed: HashMap<ThreadId, DateTime<Utc>>,
+    /// Projects whose full thread list the user has revealed with Show more.
+    expanded_thread_lists: HashSet<ProjectGroupKey>,
     terminal_last_accessed: HashMap<TerminalId, DateTime<Utc>>,
     thread_switcher: Option<Entity<ThreadSwitcher>>,
     _thread_switcher_subscriptions: Vec<gpui::Subscription>,
@@ -975,6 +992,7 @@ impl Sidebar {
             suppress_next_rename_edit: false,
 
             thread_last_accessed: HashMap::new(),
+            expanded_thread_lists: HashSet::default(),
             terminal_last_accessed: HashMap::new(),
             thread_switcher: None,
             _thread_switcher_subscriptions: Vec::new(),
@@ -1977,6 +1995,8 @@ impl Sidebar {
                     &mut entries,
                     matched_terminals,
                     matched_threads,
+                    None,
+                    |_| true,
                     &mut current_session_ids,
                     &mut current_thread_ids,
                 );
@@ -2023,13 +2043,35 @@ impl Sidebar {
                     continue;
                 }
 
-                Self::push_entries_by_display_time(
+                let visible_limit =
+                    match AgentSettings::get_global(cx).threads_sidebar_visible_threads {
+                        0 => None,
+                        limit => Some(limit),
+                    };
+                let is_expanded = self.expanded_thread_lists.contains(&group_key);
+                let active_entry = self.active_entry.as_ref();
+                let notified_threads = &notified_threads;
+                let total_rows = threads.len() + terminals.len();
+                let hidden_count = Self::push_entries_by_display_time(
                     &mut entries,
                     terminals,
                     threads,
+                    visible_limit.filter(|_| !is_expanded),
+                    |entry| {
+                        Self::entry_needs_to_stay_visible(entry, active_entry, notified_threads)
+                    },
                     &mut current_session_ids,
                     &mut current_thread_ids,
                 );
+                if hidden_count > 0
+                    || (is_expanded && visible_limit.is_some_and(|limit| total_rows > limit))
+                {
+                    entries.push(ListEntry::ShowMore {
+                        key: group_key.clone(),
+                        hidden_count,
+                        is_expanded,
+                    });
+                }
             }
         }
 
@@ -2147,6 +2189,15 @@ impl Sidebar {
             },
             ListEntry::Thread(thread) => EntryShape::Thread(thread.metadata.thread_id),
             ListEntry::Terminal(terminal) => EntryShape::Terminal(terminal.metadata.terminal_id),
+            ListEntry::ShowMore {
+                key,
+                hidden_count,
+                is_expanded,
+            } => EntryShape::ShowMore {
+                key: key.clone(),
+                hidden_count: *hidden_count,
+                is_expanded: *is_expanded,
+            },
         })
     }
 
@@ -2298,6 +2349,11 @@ impl Sidebar {
             ListEntry::Terminal(terminal) => {
                 self.render_terminal(ix, terminal, is_active, is_selected, cx)
             }
+            ListEntry::ShowMore {
+                key,
+                hidden_count,
+                is_expanded,
+            } => self.render_show_more(ix, key, *hidden_count, *is_expanded, is_selected, cx),
         };
 
         if is_group_header_after_first {
@@ -3726,6 +3782,10 @@ impl Sidebar {
                 let key = key.clone();
                 self.toggle_collapse(&key, window, cx);
             }
+            ListEntry::ShowMore { key, .. } => {
+                let key = key.clone();
+                self.toggle_thread_list_expanded(&key, cx);
+            }
             ListEntry::Thread(thread) => {
                 let metadata = thread.metadata.clone();
                 match &thread.workspace {
@@ -4487,7 +4547,7 @@ impl Sidebar {
                     self.update_entries(cx);
                 }
             }
-            Some(ListEntry::Thread(_) | ListEntry::Terminal(_)) => {
+            Some(ListEntry::Thread(_) | ListEntry::Terminal(_) | ListEntry::ShowMore { .. }) => {
                 for i in (0..ix).rev() {
                     if let Some(ListEntry::ProjectHeader { key, .. }) = self.contents.entries.get(i)
                     {
@@ -4514,12 +4574,14 @@ impl Sidebar {
         // Find the group header for the current selection.
         let header_ix = match self.contents.entries.get(ix) {
             Some(ListEntry::ProjectHeader { .. }) => Some(ix),
-            Some(ListEntry::Thread(_) | ListEntry::Terminal(_)) => (0..ix).rev().find(|&i| {
-                matches!(
-                    self.contents.entries.get(i),
-                    Some(ListEntry::ProjectHeader { .. })
-                )
-            }),
+            Some(ListEntry::Thread(_) | ListEntry::Terminal(_) | ListEntry::ShowMore { .. }) => {
+                (0..ix).rev().find(|&i| {
+                    matches!(
+                        self.contents.entries.get(i),
+                        Some(ListEntry::ProjectHeader { .. })
+                    )
+                })
+            }
             None => None,
         };
 
@@ -5907,13 +5969,51 @@ impl Sidebar {
         metadata.interacted_at.unwrap_or(metadata.updated_at)
     }
 
+    /// Rows that must not be hidden behind Show more: anything running,
+    /// waiting for the user, unread, active, or holding a draft.
+    fn entry_needs_to_stay_visible(
+        entry: &ListEntry,
+        active_entry: Option<&ActiveEntry>,
+        notified_threads: &HashSet<ThreadId>,
+    ) -> bool {
+        match entry {
+            ListEntry::Thread(thread) => {
+                matches!(
+                    thread.status,
+                    AgentThreadStatus::Running | AgentThreadStatus::WaitingForConfirmation
+                ) || thread.draft.is_some()
+                    || thread.has_unsent_draft
+                    || notified_threads.contains(&thread.metadata.thread_id)
+                    || matches!(
+                        active_entry,
+                        Some(ActiveEntry::Thread { thread_id, .. })
+                            if *thread_id == thread.metadata.thread_id
+                    )
+            }
+            ListEntry::Terminal(terminal) => {
+                terminal.has_notification
+                    || matches!(
+                        active_entry,
+                        Some(ActiveEntry::Terminal { terminal_id, .. })
+                            if *terminal_id == terminal.metadata.terminal_id
+                    )
+            }
+            ListEntry::ProjectHeader { .. } | ListEntry::ShowMore { .. } => true,
+        }
+    }
+
+    /// Pushes a project's rows newest first. With a `visible_limit`, rows past
+    /// it are left out unless `stays_visible` says otherwise; returns how many
+    /// were left out.
     fn push_entries_by_display_time(
         entries: &mut Vec<ListEntry>,
         terminals: Vec<TerminalEntry>,
         threads: Vec<Arc<ThreadEntry>>,
+        visible_limit: Option<usize>,
+        stays_visible: impl Fn(&ListEntry) -> bool,
         current_session_ids: &mut HashSet<acp::SessionId>,
         current_thread_ids: &mut HashSet<agent_ui::ThreadId>,
-    ) {
+    ) -> usize {
         fn display_time(entry: &ListEntry) -> DateTime<Utc> {
             match entry {
                 ListEntry::Thread(thread) if thread.draft == Some(DraftKind::Empty) => {
@@ -5921,7 +6021,7 @@ impl Sidebar {
                 }
                 ListEntry::Thread(thread) => Sidebar::thread_display_time(&thread.metadata),
                 ListEntry::Terminal(terminal) => terminal.metadata.created_at,
-                ListEntry::ProjectHeader { .. } => unreachable!(),
+                ListEntry::ProjectHeader { .. } | ListEntry::ShowMore { .. } => unreachable!(),
             }
         }
 
@@ -5931,15 +6031,23 @@ impl Sidebar {
             .chain(threads.into_iter().map(ListEntry::Thread))
             .sorted_by_key(|right| std::cmp::Reverse(display_time(right)));
 
-        for entry in row_entries {
+        let mut hidden_count = 0;
+        for (row_ix, entry) in row_entries.enumerate() {
+            // Hidden threads are still tracked, so their notifications and
+            // access times are kept for when they are shown again.
             if let ListEntry::Thread(thread) = &entry {
                 if let Some(session_id) = &thread.metadata.session_id {
                     current_session_ids.insert(session_id.clone());
                 }
                 current_thread_ids.insert(thread.metadata.thread_id);
             }
+            if visible_limit.is_some_and(|limit| row_ix >= limit) && !stays_visible(&entry) {
+                hidden_count += 1;
+                continue;
+            }
             entries.push(entry);
         }
+        hidden_count
     }
 
     /// The sort order used by the ctrl-tab switcher
@@ -6025,6 +6133,7 @@ impl Sidebar {
                         timestamp,
                     }))
                 }
+                ListEntry::ShowMore { .. } => None,
                 ListEntry::Terminal(terminal) => {
                     let timestamp: SharedString =
                         format_history_entry_timestamp(terminal.metadata.created_at).into();
@@ -6322,6 +6431,56 @@ impl Sidebar {
                 }),
             )
             .child(self.rename_editor.clone())
+            .into_any_element()
+    }
+
+    fn toggle_thread_list_expanded(&mut self, key: &ProjectGroupKey, cx: &mut Context<Self>) {
+        if !self.expanded_thread_lists.remove(key) {
+            self.expanded_thread_lists.insert(key.clone());
+        }
+        self.update_entries(cx);
+    }
+
+    fn render_show_more(
+        &self,
+        ix: usize,
+        key: &ProjectGroupKey,
+        hidden_count: usize,
+        is_expanded: bool,
+        is_selected: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let label: SharedString = if is_expanded {
+            "Show fewer".into()
+        } else {
+            format!("Show {hidden_count} more").into()
+        };
+        let key = key.clone();
+        h_flex()
+            .id(SharedString::from(format!("show-more-{ix}")))
+            .w_full()
+            .px_2()
+            .py_0p5()
+            .gap_1()
+            .cursor_pointer()
+            .rounded_sm()
+            .when(is_selected, |this| {
+                this.bg(cx.theme().colors().element_selected)
+            })
+            .hover(|style| style.bg(cx.theme().colors().element_hover))
+            .child(
+                Icon::new(if is_expanded {
+                    IconName::ChevronUp
+                } else {
+                    IconName::ChevronDown
+                })
+                .size(IconSize::XSmall)
+                .color(Color::Muted),
+            )
+            .child(Label::new(label).size(LabelSize::Small).color(Color::Muted))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.toggle_thread_list_expanded(&key, cx);
+            }))
             .into_any_element()
     }
 
@@ -7395,7 +7554,7 @@ impl Sidebar {
                 let workspace = terminal.workspace.clone();
                 self.activate_terminal_entry(metadata, workspace, true, window, cx);
             }
-            ListEntry::ProjectHeader { .. } => {}
+            ListEntry::ProjectHeader { .. } | ListEntry::ShowMore { .. } => {}
         }
     }
 
