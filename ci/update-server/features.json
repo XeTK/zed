@@ -51,6 +51,39 @@
       "pr": 26
     },
     {
+      "section": "projects",
+      "title": "Click a project's name to switch to it",
+      "details": [
+        "In the sidebar, clicking a project's name switches to that project. Clicking the rest of its header row still collapses or expands its threads."
+      ]
+    },
+    {
+      "section": "projects",
+      "title": "Show more threads",
+      "summary": "Long thread lists stay short.",
+      "details": [
+        "Each project shows its 5 newest threads, then a **Show N more** row that reveals the rest (and **Show fewer** to hide them again).",
+        "Threads that are running, waiting for you, unread, open, or hold an unsent draft are always shown. Searching shows every match. Set the number below; `0` shows every thread."
+      ],
+      "example": "{ \"agent\": { \"threads_sidebar_visible_threads\": 10 } }",
+      "settings": [
+        "threads_sidebar_visible_threads"
+      ]
+    },
+    {
+      "section": "projects",
+      "title": "Archive old threads automatically",
+      "summary": "Off by default.",
+      "details": [
+        "Threads not updated for the given number of days move to the archive, checked hourly. Threads that are open, running, waiting for you, unread, or hold an unsent draft are never archived.",
+        "Only the thread moves: unlike archiving by hand, no git worktree is removed. Restore threads from the archive as usual."
+      ],
+      "example": "{ \"agent\": { \"threads_sidebar_archive_after_days\": 30 } }",
+      "settings": [
+        "threads_sidebar_archive_after_days"
+      ]
+    },
+    {
       "section": "agent",
       "title": "Message timestamps",
       "summary": "When each message was sent. Saved with Zed agent threads.",
