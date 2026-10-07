@@ -261,6 +261,19 @@ pub struct AgentSettingsContent {
     ///
     /// Default: true
     pub threads_sidebar_auto_open: Option<bool>,
+    /// How many threads each project shows in the Threads Sidebar before the
+    /// rest are hidden behind a "Show more" button. Threads that are running,
+    /// waiting for you, unread, active, or hold an unsent draft are always shown.
+    /// 0 shows every thread.
+    ///
+    /// Default: 5
+    pub threads_sidebar_visible_threads: Option<usize>,
+    /// Move threads to the archive once they have not been updated for this
+    /// many days. Threads that are running, waiting for you, open, or hold an
+    /// unsent draft are never archived. 0 never archives automatically.
+    ///
+    /// Default: 0
+    pub threads_sidebar_archive_after_days: Option<u32>,
     /// Default fixed width in pixels when the agent panel is docked to the left or right and
     /// `flexible` is false.
     ///
