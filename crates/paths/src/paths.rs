@@ -49,7 +49,24 @@ pub const APP_NAME_LOWERCASE: &str = {
 /// A custom data directory override, set only by `set_custom_data_dir`.
 /// This is used to override the default data directory location.
 /// The directory will be created if it doesn't exist when set.
+/// Names a data directory for `remote_server` to use instead of the default one.
+/// The editor sets it when it starts a project's own server process on this
+/// machine, so each of those servers keeps its logs, database and state apart
+/// from the editor's and from each other. The server it spawns inherits it.
+pub const REMOTE_SERVER_DATA_DIR_ENV_VAR: &str = "ZED_REMOTE_SERVER_DATA_DIR";
+
 static CUSTOM_DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// Set when this process is a project's own server. Unlike a custom data
+/// directory chosen by the user, it also takes the logs and temporary files
+/// that would otherwise go to shared per-user locations.
+static ISOLATED_SERVER_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// Makes this process a project's own server, keeping everything it writes under `dir`.
+pub fn set_isolated_server_dir(dir: &str) -> &'static PathBuf {
+    let dir = set_custom_data_dir(dir);
+    ISOLATED_SERVER_DIR.get_or_init(|| dir.clone())
+}
 
 /// The resolved data directory, combining custom override or platform defaults.
 /// This is set once and cached for subsequent calls.
@@ -193,6 +210,10 @@ pub fn state_dir() -> &'static PathBuf {
 pub fn temp_dir() -> &'static PathBuf {
     static TEMP_DIR: OnceLock<PathBuf> = OnceLock::new();
     TEMP_DIR.get_or_init(|| {
+        if let Some(dir) = ISOLATED_SERVER_DIR.get() {
+            return dir.join("temp");
+        }
+
         if cfg!(target_os = "macos") {
             return dirs::cache_dir()
                 .expect("failed to determine cachesDirectory directory")
@@ -228,7 +249,9 @@ pub fn hang_traces_dir() -> &'static PathBuf {
 pub fn logs_dir() -> &'static PathBuf {
     static LOGS_DIR: OnceLock<PathBuf> = OnceLock::new();
     LOGS_DIR.get_or_init(|| {
-        if cfg!(target_os = "macos") {
+        if let Some(dir) = ISOLATED_SERVER_DIR.get() {
+            dir.join("logs")
+        } else if cfg!(target_os = "macos") {
             home_dir().join("Library/Logs").join(APP_NAME)
         } else {
             data_dir().join("logs")
@@ -239,7 +262,31 @@ pub fn logs_dir() -> &'static PathBuf {
 /// Returns the path to the Zed server directory on this SSH host.
 pub fn remote_server_state_dir() -> &'static PathBuf {
     static REMOTE_SERVER_STATE: OnceLock<PathBuf> = OnceLock::new();
-    REMOTE_SERVER_STATE.get_or_init(|| data_dir().join("server_state"))
+    REMOTE_SERVER_STATE.get_or_init(|| match ISOLATED_SERVER_DIR.get() {
+        Some(dir) => isolated_server_state_dir(dir),
+        None => data_dir().join("server_state"),
+    })
+}
+
+/// Where a project's own server keeps its sockets and pid file.
+///
+/// Unix socket paths are limited to about 100 bytes, and a data directory deep
+/// in the user's home plus the connection identifier would go over, so the
+/// server's socket would fail to bind. This path is short, and still unique to
+/// the data directory it belongs to.
+pub fn isolated_server_state_dir(data_dir: &Path) -> PathBuf {
+    // FNV-1a rather than `DefaultHasher`, which may change between releases.
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in data_dir.to_string_lossy().bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    let base = if cfg!(windows) {
+        std::env::temp_dir()
+    } else {
+        PathBuf::from("/tmp")
+    };
+    base.join(format!("zed-iso-{:08x}", hash >> 32))
 }
 
 /// Returns the path to the `Zed.log` file.
