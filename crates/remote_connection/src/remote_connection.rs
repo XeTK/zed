@@ -253,6 +253,9 @@ impl RemoteConnectionModal {
                 (options.distro_name.clone(), None, true, false)
             }
             RemoteConnectionOptions::Docker(options) => (options.name.clone(), None, false, true),
+            RemoteConnectionOptions::LocalProcess(_) => {
+                ("Separate process".to_string(), None, false, false)
+            }
             #[cfg(feature = "test-support")]
             RemoteConnectionOptions::Mock(options) => {
                 (format!("mock-{}", options.id), None, false, false)

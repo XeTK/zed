@@ -624,6 +624,9 @@ impl TitleBar {
             RemoteConnectionOptions::Docker(_dev_container_connection) => {
                 (None, "Dev Container", IconName::Box)
             }
+            RemoteConnectionOptions::LocalProcess(_) => {
+                (None, "Project in its own process", IconName::Blocks)
+            }
             #[cfg(any(test, feature = "test-support"))]
             RemoteConnectionOptions::Mock(_) => (None, "Mock Remote Project", IconName::Server),
         };

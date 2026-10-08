@@ -413,6 +413,11 @@ impl ProjectPicker {
                 connection_string: "".into(),
                 nickname: None,
             },
+            RemoteConnectionOptions::LocalProcess(_) => ProjectPickerData::Ssh {
+                // Isolated projects are never opened from the remote project picker
+                connection_string: "".into(),
+                nickname: None,
+            },
             #[cfg(any(test, feature = "test-support"))]
             RemoteConnectionOptions::Mock(options) => ProjectPickerData::Ssh {
                 connection_string: format!("mock-{}", options.id).into(),

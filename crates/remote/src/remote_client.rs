@@ -6,6 +6,7 @@ use crate::{
     proxy::ProxyLaunchError,
     transport::{
         docker::{DockerConnectionOptions, DockerExecConnection},
+        local::{LocalProcessConnection, LocalProcessConnectionOptions},
         ssh::SshRemoteConnection,
         wsl::{WslConnectionOptions, WslRemoteConnection},
     },
@@ -1284,6 +1285,11 @@ impl ConnectionPool {
                                 .await
                                 .map(|connection| Arc::new(connection) as Arc<dyn RemoteConnection>)
                         }
+                        RemoteConnectionOptions::LocalProcess(opts) => {
+                            LocalProcessConnection::new(opts, delegate, cx)
+                                .await
+                                .map(|connection| Arc::new(connection) as Arc<dyn RemoteConnection>)
+                        }
                         #[cfg(any(test, feature = "test-support"))]
                         RemoteConnectionOptions::Mock(opts) => match cx.update(|cx| {
                             cx.default_global::<crate::transport::mock::MockConnectionRegistry>()
@@ -1331,6 +1337,8 @@ pub enum RemoteConnectionOptions {
     Ssh(SshConnectionOptions),
     Wsl(WslConnectionOptions),
     Docker(DockerConnectionOptions),
+    /// A project backend running in its own process on this machine.
+    LocalProcess(LocalProcessConnectionOptions),
     #[cfg(any(test, feature = "test-support"))]
     Mock(crate::transport::mock::MockConnectionOptions),
 }
@@ -1350,6 +1358,7 @@ impl RemoteConnectionOptions {
                     opts.name.clone()
                 }
             }
+            RemoteConnectionOptions::LocalProcess(_) => "Separate process".to_string(),
             #[cfg(any(test, feature = "test-support"))]
             RemoteConnectionOptions::Mock(opts) => format!("mock-{}", opts.id),
         }
@@ -1368,6 +1377,7 @@ impl RemoteConnectionOptions {
                     "docker"
                 }
             }
+            RemoteConnectionOptions::LocalProcess(_) => "local_process",
             #[cfg(any(test, feature = "test-support"))]
             RemoteConnectionOptions::Mock(_) => "mock",
         }
@@ -1378,6 +1388,7 @@ impl RemoteConnectionOptions {
             RemoteConnectionOptions::Ssh(opts) => opts.host.to_string(),
             RemoteConnectionOptions::Wsl(opts) => opts.distro_name.clone(),
             RemoteConnectionOptions::Docker(opts) => opts.name.clone(),
+            RemoteConnectionOptions::LocalProcess(opts) => opts.id.clone(),
             #[cfg(any(test, feature = "test-support"))]
             RemoteConnectionOptions::Mock(opts) => format!("mock-{}", opts.id),
         }
