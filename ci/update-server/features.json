@@ -84,6 +84,15 @@
       ]
     },
     {
+      "section": "stability",
+      "title": "Projects in their own process (experimental)",
+      "summary": "A crash in a project's backend no longer closes the window.",
+      "details": [
+        "Run **Open Folder in Separate Process** from the command palette. The project's language servers, git and file access then run in their own process on this machine, with their own data directory, so a crash there does not take the window down. A panic in the editor's own interface still closes the app.",
+        "Each project shows a small icon beside its name in the sidebar: a screen for a normal project, blocks for one in its own process, and a server, Linux logo or box for remote and container projects."
+      ]
+    },
+    {
       "section": "agent",
       "title": "Message timestamps",
       "summary": "When each message was sent. Saved with Zed agent threads.",
