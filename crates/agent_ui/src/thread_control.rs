@@ -53,6 +53,9 @@ pub fn init(cx: &mut App) {
 #[derive(Default)]
 struct ControlServer {
     running: Option<RunningServer>,
+    /// Where to put the socket and the discovery file, instead of the usual
+    /// places. For tests, which must not touch the real ones.
+    paths: Option<(PathBuf, PathBuf)>,
 }
 
 impl Global for ControlServer {}
@@ -88,7 +91,12 @@ fn apply_settings(cx: &mut App) {
         return;
     }
 
-    match start_server(mode, socket_path(), discovery_path(), cx) {
+    let (socket, discovery) = cx
+        .global::<ControlServer>()
+        .paths
+        .clone()
+        .unwrap_or_else(|| (socket_path(), discovery_path()));
+    match start_server(mode, socket, discovery, cx) {
         Ok(server) => cx.global_mut::<ControlServer>().running = Some(server),
         Err(error) => log::error!("failed to start the thread control server: {error:#}"),
     }
@@ -323,6 +331,7 @@ fn workspaces(cx: &App) -> Vec<Entity<Workspace>> {
 fn list_projects(cx: &App) -> Result<Value> {
     let policy = Policy::current(cx);
     let mut projects = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     for window in cx.windows() {
         let Some(window) = window.downcast::<MultiWorkspace>() else {
             continue;
@@ -330,27 +339,40 @@ fn list_projects(cx: &App) -> Result<Value> {
         let Ok(multi_workspace) = window.read(cx) else {
             continue;
         };
-        for group in multi_workspace.project_groups(cx) {
-            if !policy.includes(group.key.path_list().paths().iter().map(|p| p.as_path())) {
-                continue;
-            }
-            let paths: Vec<_> = group
-                .key
+        // The sidebar's project groups, plus every open workspace's own project:
+        // a project that is open but not yet in a group is still open.
+        let group_keys = multi_workspace
+            .project_groups(cx)
+            .into_iter()
+            .map(|group| group.key);
+        let workspace_keys = multi_workspace
+            .workspaces()
+            .map(|workspace| workspace.read(cx).project_group_key(cx))
+            .collect::<Vec<_>>();
+        for key in group_keys.chain(workspace_keys) {
+            let paths: Vec<_> = key
                 .path_list()
                 .paths()
                 .iter()
                 .map(|path| path.to_string_lossy().into_owned())
                 .collect();
+            let kind = match key.host() {
+                None => "local",
+                Some(host) => host.connection_type(),
+            };
+            if paths.is_empty()
+                || !policy.includes(key.path_list().paths().iter().map(|p| p.as_path()))
+                || !seen.insert((paths.clone(), kind))
+            {
+                continue;
+            }
             projects.push(json!({
                 "name": paths
                     .first()
                     .and_then(|path| path.rsplit('/').next())
                     .unwrap_or_default(),
                 "paths": paths,
-                "kind": match group.key.host() {
-                    None => "local",
-                    Some(host) => host.connection_type(),
-                },
+                "kind": kind,
             }));
         }
     }
@@ -856,6 +878,137 @@ mod tests {
     ) -> Result<Value> {
         cx.spawn(async move |cx| handle_request(method, params, &mut cx.clone()).await)
             .await
+    }
+
+    fn read_discovery(path: &std::path::Path) -> Value {
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    #[gpui::test]
+    async fn test_the_server_follows_the_setting(cx: &mut TestAppContext) {
+        init_test(cx);
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("c.sock");
+        let discovery = directory.path().join("control.json");
+        cx.update(|cx| {
+            claims::init(cx);
+            cx.set_global(ControlServer {
+                running: None,
+                paths: Some((socket.clone(), discovery.clone())),
+            });
+        });
+        let set_mode = |mode: ThreadControlMode, cx: &mut TestAppContext| {
+            cx.update(|cx| {
+                use gpui::UpdateGlobal as _;
+                settings::SettingsStore::update_global(cx, |store, cx| {
+                    store.update_user_settings(cx, |content| {
+                        content.agent.get_or_insert_default().thread_control = Some(mode);
+                    });
+                });
+                apply_settings(cx);
+            });
+        };
+
+        // Off by default: nothing listens and nothing is written.
+        cx.update(apply_settings);
+        assert!(!socket.exists() && !discovery.exists());
+
+        set_mode(ThreadControlMode::ReadOnly, cx);
+        assert!(
+            socket.exists() && discovery.exists(),
+            "turning it on starts the server"
+        );
+        let first_token = read_discovery(&discovery)["token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(read_discovery(&discovery)["pid"], std::process::id());
+
+        // The same mode again changes nothing.
+        set_mode(ThreadControlMode::ReadOnly, cx);
+        assert_eq!(read_discovery(&discovery)["token"], first_token.as_str());
+
+        // A different mode restarts it with a new token.
+        set_mode(ThreadControlMode::ReadWrite, cx);
+        assert!(socket.exists());
+        assert_ne!(read_discovery(&discovery)["token"], first_token.as_str());
+
+        set_mode(ThreadControlMode::Off, cx);
+        assert!(
+            !socket.exists() && !discovery.exists(),
+            "turning it off removes both files"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_an_enormous_request_ends_the_connection(cx: &mut TestAppContext) {
+        init_test(cx);
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("c.sock");
+        let discovery = directory.path().join("control.json");
+        let _server = cx
+            .update(|cx| start_server(ThreadControlMode::ReadOnly, socket.clone(), discovery, cx))
+            .unwrap();
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let stream = std::os::unix::net::UnixStream::connect(socket).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(20)))
+                .unwrap();
+            let mut writer = stream.try_clone().unwrap();
+            let big = "x".repeat(MAX_REQUEST_BYTES as usize + 10);
+            // The server may hang up part way through; that is the point.
+            writeln!(writer, "{big}").ok();
+            let mut reply = String::new();
+            let read = std::io::BufReader::new(stream).read_line(&mut reply);
+            sender.send((read.unwrap_or(0), reply)).unwrap();
+        });
+        cx.executor().allow_parking();
+        let (bytes_read, reply) = loop {
+            cx.run_until_parked();
+            match receiver.recv_timeout(Duration::from_millis(50)) {
+                Ok(result) => break result,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(error) => panic!("client failed: {error}"),
+            }
+        };
+        assert_eq!(
+            bytes_read, 0,
+            "the server hung up without answering: {reply:?}"
+        );
+    }
+
+    #[test]
+    fn test_with_client_names_the_asker_and_keeps_the_arguments() {
+        let named = with_client(json!({ "id": "t" }), Some("  Claude Desktop  ".to_string()));
+        assert_eq!(named, json!({ "id": "t", "_client": "Claude Desktop" }));
+
+        let unnamed = with_client(Value::Null, None);
+        assert_eq!(unnamed, json!({ "_client": "an MCP client" }));
+        assert_eq!(
+            with_client(json!({}), Some("   ".to_string()))["_client"],
+            "an MCP client"
+        );
+
+        // A caller cannot pass itself off as someone else through the arguments.
+        let forged = with_client(
+            json!({ "_client": "Someone else" }),
+            Some("Claude".to_string()),
+        );
+        assert_eq!(forged["_client"], "Claude");
+
+        let long = with_client(json!({}), Some("x".repeat(500)));
+        assert_eq!(long["_client"].as_str().unwrap().len(), 60);
+    }
+
+    #[test]
+    fn test_prompt_text_is_cut_on_a_character_boundary() {
+        assert_eq!(truncate_for_prompt("short"), "short");
+        let long = "é".repeat(700);
+        let cut = truncate_for_prompt(&long);
+        assert!(cut.ends_with('…'));
+        assert_eq!(cut.chars().count(), 601);
     }
 
     #[gpui::test]
