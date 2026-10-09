@@ -203,6 +203,7 @@ fn assert_remote_project_integration_sidebar_state(
                     terminal.metadata.title
                 );
             }
+            ListEntry::ShowMore { .. } => {}
         }
     }
 
@@ -689,6 +690,17 @@ fn visible_entries_as_strings(
                         let worktree = format_linked_worktree_chips(&terminal.worktrees);
                         format!("  {title}{worktree}{selected}")
                     }
+                    ListEntry::ShowMore {
+                        hidden_count,
+                        is_expanded,
+                        ..
+                    } => {
+                        if *is_expanded {
+                            format!("  [Show fewer]{selected}")
+                        } else {
+                            format!("  [Show {hidden_count} more]{selected}")
+                        }
+                    }
                 }
             })
             .collect()
@@ -807,6 +819,218 @@ async fn test_thread_status_update_does_not_reset_list_measurements(cx: &mut Tes
         before, after,
         "a no-op rebuild should produce an identical shape sequence"
     );
+}
+
+#[gpui::test]
+async fn test_long_thread_lists_show_the_newest_and_a_show_more_row(cx: &mut TestAppContext) {
+    let project = init_test_project("/my-project", cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let sidebar = setup_sidebar(&multi_workspace, cx);
+
+    save_n_test_threads(7, &project, cx).await;
+    cx.run_until_parked();
+
+    // Default limit is 5; Thread 7 is the newest.
+    assert_eq!(
+        visible_entries_as_strings(&sidebar, cx),
+        vec![
+            "v [my-project]",
+            "  Thread 7",
+            "  Thread 6",
+            "  Thread 5",
+            "  Thread 4",
+            "  Thread 3",
+            "  [Show 2 more]",
+        ]
+    );
+
+    let project_group_key = project.read_with(cx, |project, cx| project.project_group_key(cx));
+    sidebar.update(cx, |sidebar, cx| {
+        sidebar.toggle_thread_list_expanded(&project_group_key, cx);
+    });
+    cx.run_until_parked();
+    let expanded = visible_entries_as_strings(&sidebar, cx);
+    assert_eq!(
+        expanded.len(),
+        9,
+        "all seven threads and Show fewer: {expanded:?}"
+    );
+    assert_eq!(expanded.last().map(String::as_str), Some("  [Show fewer]"));
+
+    sidebar.update(cx, |sidebar, cx| {
+        sidebar.toggle_thread_list_expanded(&project_group_key, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        visible_entries_as_strings(&sidebar, cx)
+            .last()
+            .map(String::as_str),
+        Some("  [Show 2 more]")
+    );
+}
+
+#[gpui::test]
+async fn test_thread_list_limit_can_be_turned_off(cx: &mut TestAppContext) {
+    let project = init_test_project("/my-project", cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let sidebar = setup_sidebar(&multi_workspace, cx);
+    cx.update(|_, cx| {
+        AgentSettings::override_global(
+            AgentSettings {
+                threads_sidebar_visible_threads: 0,
+                ..AgentSettings::get_global(cx).clone()
+            },
+            cx,
+        );
+    });
+
+    save_n_test_threads(7, &project, cx).await;
+    cx.run_until_parked();
+    let entries = visible_entries_as_strings(&sidebar, cx);
+    assert_eq!(
+        entries.len(),
+        8,
+        "every thread, no Show more row: {entries:?}"
+    );
+}
+
+#[gpui::test]
+async fn test_threads_needing_attention_stay_visible_past_the_limit(cx: &mut TestAppContext) {
+    let project = init_test_project("/my-project", cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let sidebar = setup_sidebar(&multi_workspace, cx);
+
+    save_n_test_threads(7, &project, cx).await;
+    cx.run_until_parked();
+
+    // Thread 1 is the oldest, so it would be hidden, but it is unread.
+    let oldest_thread_id = sidebar.read_with(cx, |_, cx| {
+        ThreadMetadataStore::global(cx)
+            .read(cx)
+            .entry_by_session(&acp::SessionId::new(Arc::from("thread-0")))
+            .map(|metadata| metadata.thread_id)
+            .expect("thread-0 should be saved")
+    });
+    sidebar.update(cx, |sidebar, cx| {
+        sidebar.contents.notified_threads.insert(oldest_thread_id);
+        sidebar.update_entries(cx);
+    });
+    cx.run_until_parked();
+
+    assert_eq!(
+        visible_entries_as_strings(&sidebar, cx),
+        vec![
+            "v [my-project]",
+            "  Thread 7",
+            "  Thread 6",
+            "  Thread 5",
+            "  Thread 4",
+            "  Thread 3",
+            "  Thread 1 (!)",
+            "  [Show 1 more]",
+        ]
+    );
+}
+
+fn set_archive_after_days(days: u32, cx: &mut gpui::VisualTestContext) {
+    cx.update(|_, cx| {
+        AgentSettings::override_global(
+            AgentSettings {
+                threads_sidebar_archive_after_days: days,
+                ..AgentSettings::get_global(cx).clone()
+            },
+            cx,
+        );
+    });
+}
+
+fn is_archived(session: &str, cx: &mut gpui::VisualTestContext) -> bool {
+    cx.update(|_, cx| {
+        ThreadMetadataStore::global(cx)
+            .read(cx)
+            .entry_by_session(&acp::SessionId::new(Arc::from(session)))
+            .map(|metadata| metadata.archived)
+            .expect("thread should be saved")
+    })
+}
+
+#[gpui::test]
+async fn test_stale_threads_are_archived_after_the_configured_days(cx: &mut TestAppContext) {
+    let project = init_test_project("/my-project", cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let sidebar = setup_sidebar(&multi_workspace, cx);
+
+    // thread-0..thread-2 were last updated in 2024.
+    save_n_test_threads(3, &project, cx).await;
+    let now = chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 3, 1, 0, 0, 0).unwrap();
+    save_thread_metadata(
+        acp::SessionId::new(Arc::from("recent")),
+        Some("Recent".into()),
+        now - chrono::Duration::days(2),
+        None,
+        None,
+        &project,
+        cx,
+    );
+    cx.run_until_parked();
+
+    // Off by default.
+    let archived = sidebar.update(cx, |sidebar, cx| sidebar.archive_stale_threads(now, cx));
+    assert_eq!(archived, 0);
+    assert!(!is_archived("thread-0", cx));
+
+    set_archive_after_days(30, cx);
+    let archived = sidebar.update(cx, |sidebar, cx| sidebar.archive_stale_threads(now, cx));
+    cx.run_until_parked();
+    assert_eq!(archived, 3);
+    for session in ["thread-0", "thread-1", "thread-2"] {
+        assert!(is_archived(session, cx), "{session} is older than 30 days");
+    }
+    assert!(
+        !is_archived("recent", cx),
+        "a thread updated 2 days ago stays"
+    );
+    assert_eq!(
+        visible_entries_as_strings(&sidebar, cx),
+        vec!["v [my-project]", "  Recent"]
+    );
+
+    // A second pass finds nothing new.
+    let archived = sidebar.update(cx, |sidebar, cx| sidebar.archive_stale_threads(now, cx));
+    assert_eq!(archived, 0);
+}
+
+#[gpui::test]
+async fn test_unread_threads_are_not_archived(cx: &mut TestAppContext) {
+    let project = init_test_project("/my-project", cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let sidebar = setup_sidebar(&multi_workspace, cx);
+
+    save_n_test_threads(2, &project, cx).await;
+    cx.run_until_parked();
+    let unread_thread_id = cx.update(|_, cx| {
+        ThreadMetadataStore::global(cx)
+            .read(cx)
+            .entry_by_session(&acp::SessionId::new(Arc::from("thread-0")))
+            .map(|metadata| metadata.thread_id)
+            .expect("thread-0 should be saved")
+    });
+    sidebar.update(cx, |sidebar, cx| {
+        sidebar.contents.notified_threads.insert(unread_thread_id);
+        sidebar.update_entries(cx);
+    });
+
+    set_archive_after_days(30, cx);
+    let now = chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 3, 1, 0, 0, 0).unwrap();
+    sidebar.update(cx, |sidebar, cx| sidebar.archive_stale_threads(now, cx));
+    cx.run_until_parked();
+    assert!(!is_archived("thread-0", cx), "unread threads are kept");
+    assert!(is_archived("thread-1", cx));
 }
 
 #[gpui::test]
@@ -5646,7 +5870,9 @@ async fn test_rename_thread_from_sidebar_updates_title_override(cx: &mut TestApp
                     thread.metadata.thread_id,
                     thread.metadata.display_title(),
                 )),
-                ListEntry::ProjectHeader { .. } | ListEntry::Terminal(_) => None,
+                ListEntry::ProjectHeader { .. }
+                | ListEntry::Terminal(_)
+                | ListEntry::ShowMore { .. } => None,
             })
             .expect("sidebar should have a thread entry")
     });
@@ -5732,7 +5958,9 @@ async fn test_rename_thread_from_sidebar_updates_title_override(cx: &mut TestApp
             .iter()
             .find_map(|entry| match entry {
                 ListEntry::Thread(thread) => Some(thread),
-                ListEntry::ProjectHeader { .. } | ListEntry::Terminal(_) => None,
+                ListEntry::ProjectHeader { .. }
+                | ListEntry::Terminal(_)
+                | ListEntry::ShowMore { .. } => None,
             })
             .expect("renamed thread should match the search");
         let title = thread.metadata.display_title();
@@ -5771,7 +5999,9 @@ async fn test_rename_selected_thread_action_renames_selected_thread(cx: &mut Tes
             .enumerate()
             .find_map(|(ix, entry)| match entry {
                 ListEntry::Thread(thread) => Some((ix, thread.metadata.thread_id)),
-                ListEntry::ProjectHeader { .. } | ListEntry::Terminal(_) => None,
+                ListEntry::ProjectHeader { .. }
+                | ListEntry::Terminal(_)
+                | ListEntry::ShowMore { .. } => None,
             })
             .expect("sidebar should have a thread entry")
     });
@@ -7939,6 +8169,7 @@ async fn test_clicking_worktree_thread_does_not_briefly_render_as_separate_proje
                         terminal.metadata.title
                     );
                 }
+                ListEntry::ShowMore { .. } => {}
             }
         }
 
@@ -12499,6 +12730,118 @@ async fn test_startup_successful_restoration_no_spurious_draft(cx: &mut TestAppC
     sidebar.read_with(cx, |sidebar, _| {
         assert_active_thread(sidebar, &session_id, "should be on the thread, not a draft");
     });
+}
+
+#[gpui::test]
+async fn test_project_header_title_click_switches_and_rest_collapses(cx: &mut TestAppContext) {
+    let project_a = init_test_project_with_agent_panel("/project-a", cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a.clone(), window, cx));
+    let (sidebar, _panel_a) = setup_sidebar_with_agent_panel(&multi_workspace, cx);
+
+    let fs = cx.update(|_window, cx| <dyn fs::Fs>::global(cx));
+    fs.as_fake()
+        .insert_tree("/project-b", serde_json::json!({ "src": {} }))
+        .await;
+    let project_b =
+        project::Project::test(fs.clone() as Arc<dyn Fs>, ["/project-b".as_ref()], cx).await;
+    let workspace_b = multi_workspace.update_in(cx, |mw, window, cx| {
+        mw.test_add_workspace(project_b.clone(), window, cx)
+    });
+    let _panel_b = add_agent_panel(&workspace_b, cx);
+    cx.run_until_parked();
+
+    let active_is_a = |cx: &mut gpui::VisualTestContext| {
+        multi_workspace.read_with(cx, |mw, cx| {
+            mw.workspace()
+                .read(cx)
+                .project()
+                .read(cx)
+                .visible_worktrees(cx)
+                .any(|worktree| {
+                    worktree
+                        .read(cx)
+                        .abs_path()
+                        .to_string_lossy()
+                        .contains("project-a")
+                })
+        })
+    };
+    assert!(
+        !active_is_a(cx),
+        "project-b should be active after adding it"
+    );
+
+    let header_ix_for_a = |cx: &mut gpui::VisualTestContext| {
+        sidebar.read_with(cx, |sidebar, _| {
+            sidebar
+                .contents
+                .entries
+                .iter()
+                .position(|entry| {
+                    matches!(entry, ListEntry::ProjectHeader { label, .. } if label.contains("project-a"))
+                })
+                .expect("project-a should have a header")
+        })
+    };
+    let header_bounds = |ix: usize, cx: &mut gpui::VisualTestContext| {
+        cx.draw(
+            gpui::point(px(0.), px(0.)),
+            gpui::size(px(400.), px(400.)),
+            |_, _| sidebar.clone().into_any_element(),
+        );
+        sidebar.read_with(cx, |sidebar, _| {
+            sidebar
+                .list_state
+                .bounds_for_item(ix)
+                .expect("the header should be measured")
+        })
+    };
+    let collapsed_a = |cx: &mut gpui::VisualTestContext| {
+        sidebar.read_with(cx, |sidebar, cx| {
+            let key = sidebar
+                .contents
+                .entries
+                .iter()
+                .find_map(|entry| match entry {
+                    ListEntry::ProjectHeader { key, label, .. } if label.contains("project-a") => {
+                        Some(key.clone())
+                    }
+                    _ => None,
+                })
+                .expect("project-a should have a header");
+            sidebar.is_group_collapsed(&key, cx)
+        })
+    };
+
+    // The title sits at the start of the header row.
+    let bounds = header_bounds(header_ix_for_a(cx), cx);
+    cx.simulate_click(
+        gpui::point(bounds.left() + px(30.), bounds.top() + px(14.)),
+        gpui::Modifiers::none(),
+    );
+    cx.run_until_parked();
+    assert!(
+        active_is_a(cx),
+        "clicking the title switches to the project"
+    );
+    assert!(!collapsed_a(cx), "clicking the title does not collapse it");
+
+    // The space to the right of the title collapses the group instead.
+    let bounds = header_bounds(header_ix_for_a(cx), cx);
+    cx.simulate_click(
+        gpui::point(bounds.left() + px(200.), bounds.top() + px(14.)),
+        gpui::Modifiers::none(),
+    );
+    cx.run_until_parked();
+    assert!(
+        collapsed_a(cx),
+        "clicking beside the title collapses the group"
+    );
+    assert!(
+        active_is_a(cx),
+        "collapsing does not change the active project"
+    );
 }
 
 #[gpui::test]

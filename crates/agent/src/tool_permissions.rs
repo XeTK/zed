@@ -612,8 +612,13 @@ mod tests {
             sidebar_side: Default::default(),
             threads_sidebar_default_width: px(300.),
             threads_sidebar_auto_open: true,
+            threads_sidebar_visible_threads: 5,
+            threads_sidebar_archive_after_days: 0,
             thinking_display: Default::default(),
             message_timestamps: Default::default(),
+            thread_control: Default::default(),
+            thread_control_permissions: Default::default(),
+            thread_control_projects: Default::default(),
         }
     }
 

@@ -19,7 +19,8 @@ use settings::{
     DockPosition, DockSide, IntoGpui, LanguageModelParameters, LanguageModelSelection,
     MessageTimestamps, NotifyWhenAgentWaiting, PlaySoundWhenAgentDone, RegisterSetting, Settings,
     SettingsContent, SettingsStore, SidebarDockPosition, SidebarSide, ThinkingBlockDisplay,
-    ToolPermissionMode, update_settings_file, update_settings_file_with_completion,
+    ThreadControlMode, ThreadControlPermission, ToolPermissionMode, update_settings_file,
+    update_settings_file_with_completion,
 };
 use util::ResultExt as _;
 
@@ -172,6 +173,17 @@ impl fmt::Display for AutoCompactThreshold {
     }
 }
 
+/// What other programs may do to threads under `thread_control: read_write`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ThreadControlPermissions {
+    pub claim_thread: ThreadControlPermission,
+    pub send_message: ThreadControlPermission,
+    pub create_thread: ThreadControlPermission,
+    pub cancel_turn: ThreadControlPermission,
+    pub archive_thread: ThreadControlPermission,
+    pub rename_thread: ThreadControlPermission,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AutoCompactSettings {
     pub enabled: bool,
@@ -216,6 +228,8 @@ pub struct AgentSettings {
     pub sidebar_side: SidebarDockPosition,
     pub threads_sidebar_default_width: Pixels,
     pub threads_sidebar_auto_open: bool,
+    pub threads_sidebar_visible_threads: usize,
+    pub threads_sidebar_archive_after_days: u32,
     pub default_width: Pixels,
     pub default_height: Pixels,
     pub max_content_width: Option<Pixels>,
@@ -246,6 +260,9 @@ pub struct AgentSettings {
     pub terminal_init_command: Option<String>,
     pub thinking_display: ThinkingBlockDisplay,
     pub message_timestamps: MessageTimestamps,
+    pub thread_control: ThreadControlMode,
+    pub thread_control_permissions: ThreadControlPermissions,
+    pub thread_control_projects: Vec<String>,
     pub cancel_generation_on_terminal_stop: bool,
     pub use_modifier_to_send: bool,
     pub message_editor_min_lines: usize,
@@ -778,6 +795,8 @@ impl Settings for AgentSettings {
                 .into_gpui()
                 .clamp(THREADS_LIST_MIN_WIDTH, THREADS_LIST_MAX_WIDTH),
             threads_sidebar_auto_open: agent.threads_sidebar_auto_open.unwrap(),
+            threads_sidebar_visible_threads: agent.threads_sidebar_visible_threads.unwrap(),
+            threads_sidebar_archive_after_days: agent.threads_sidebar_archive_after_days.unwrap(),
             default_width: agent.default_width.unwrap().into_gpui(),
             default_height: agent.default_height.unwrap().into_gpui(),
             max_content_width: if agent.limit_content_width.unwrap() {
@@ -833,6 +852,19 @@ impl Settings for AgentSettings {
                 .filter(|command| !command.trim().is_empty()),
             thinking_display: agent.thinking_display.unwrap(),
             message_timestamps: agent.message_timestamps.unwrap(),
+            thread_control: agent.thread_control.unwrap(),
+            thread_control_permissions: {
+                let permissions = agent.thread_control_permissions.unwrap_or_default();
+                ThreadControlPermissions {
+                    claim_thread: permissions.claim_thread.unwrap_or_default(),
+                    send_message: permissions.send_message.unwrap_or_default(),
+                    create_thread: permissions.create_thread.unwrap_or_default(),
+                    cancel_turn: permissions.cancel_turn.unwrap_or_default(),
+                    archive_thread: permissions.archive_thread.unwrap_or_default(),
+                    rename_thread: permissions.rename_thread.unwrap_or_default(),
+                }
+            },
+            thread_control_projects: agent.thread_control_projects.unwrap_or_default(),
             cancel_generation_on_terminal_stop: agent.cancel_generation_on_terminal_stop.unwrap(),
             use_modifier_to_send: agent.use_modifier_to_send.unwrap(),
             message_editor_min_lines: agent.message_editor_min_lines.unwrap(),

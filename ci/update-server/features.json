@@ -51,6 +51,48 @@
       "pr": 26
     },
     {
+      "section": "projects",
+      "title": "Click a project's name to switch to it",
+      "details": [
+        "In the sidebar, clicking a project's name switches to that project. Clicking the rest of its header row still collapses or expands its threads."
+      ]
+    },
+    {
+      "section": "projects",
+      "title": "Show more threads",
+      "summary": "Long thread lists stay short.",
+      "details": [
+        "Each project shows its 5 newest threads, then a **Show N more** row that reveals the rest (and **Show fewer** to hide them again).",
+        "Threads that are running, waiting for you, unread, open, or hold an unsent draft are always shown. Searching shows every match. Set the number below; `0` shows every thread."
+      ],
+      "example": "{ \"agent\": { \"threads_sidebar_visible_threads\": 10 } }",
+      "settings": [
+        "threads_sidebar_visible_threads"
+      ]
+    },
+    {
+      "section": "projects",
+      "title": "Archive old threads automatically",
+      "summary": "Off by default.",
+      "details": [
+        "Threads not updated for the given number of days move to the archive, checked hourly. Threads that are open, running, waiting for you, unread, or hold an unsent draft are never archived.",
+        "Only the thread moves: unlike archiving by hand, no git worktree is removed. Restore threads from the archive as usual."
+      ],
+      "example": "{ \"agent\": { \"threads_sidebar_archive_after_days\": 30 } }",
+      "settings": [
+        "threads_sidebar_archive_after_days"
+      ]
+    },
+    {
+      "section": "stability",
+      "title": "Projects in their own process (experimental)",
+      "summary": "A crash in a project's backend no longer closes the window.",
+      "details": [
+        "Run **Open Folder in Separate Process** from the command palette. The project's language servers, git and file access then run in their own process on this machine, with their own data directory, so a crash there does not take the window down. A panic in the editor's own interface still closes the app.",
+        "Each project shows a small icon beside its name in the sidebar: a screen for a normal project, blocks for one in its own process, and a server, Linux logo or box for remote and container projects."
+      ]
+    },
+    {
       "section": "agent",
       "title": "Message timestamps",
       "summary": "When each message was sent. Saved with Zed agent threads.",
@@ -119,6 +161,29 @@
         "The threads archive matches and highlights the title shown on screen, including titles you renamed."
       ],
       "pr": 11
+    },
+    {
+      "section": "agent",
+      "title": "Let Claude and other AI tools use your threads (experimental)",
+      "summary": "Off by default. Reading and changing are separate, and each change can be allowed, asked about, or denied.",
+      "details": [
+        "Set `agent.thread_control` to `read_only`. Zed then listens on a local socket that only your user can use, and writes the token to `control.json` in its data directory. Point an MCP client at the bundled command, for example `claude mcp add zed-threads -- \"/Applications/Zed xetk Nightly.app/Contents/MacOS/cli\" --mcp`. It offers **list_projects**, **list_threads** and **get_thread**.",
+        "Set it to `read_write` to let the client also **send_message**, **create_thread**, **cancel_turn**, **archive_thread** and **rename_thread**. Each has its own permission in `agent.thread_control_permissions`: `deny` (refused, and not offered), `ask` (Zed shows a prompt every time and waits for you; the default) or `allow`. Sending a message or starting a thread makes an agent run, so think before allowing those.",
+        "**Handing a thread over:** a client can **claim_thread** to be the one driving it. Zed asks you (by default), shows \"<client> is driving this thread\" with a **Take Back** button, and locks the thread's own message box so you do not both write to the same session. While it holds the claim its messages and stops go through without asking each time. **release_thread**, you taking it back, or 10 idle minutes hand it back. Another program cannot change a thread that is claimed. Taking a thread over also hands back where it stands (**get_handoff** gives the same without taking it: the goal, the latest messages, recent tool calls, files touched, and anything waiting for you), so the client can carry on the work itself. When it calls **release_thread** with a note, the note is left in the thread's message box, unsent, for you to read and send so the thread's own agent hears about it.",
+        "`agent.thread_control_projects` limits all of it to threads in the folders you list. Threads outside them are invisible to the client. Approving tool calls is not available to MCP clients."
+      ],
+      "example": "{ \"agent\": { \"thread_control\": \"read_write\", \"thread_control_permissions\": { \"claim_thread\": \"ask\", \"send_message\": \"ask\", \"create_thread\": \"ask\", \"cancel_turn\": \"allow\", \"archive_thread\": \"allow\", \"rename_thread\": \"allow\" }, \"thread_control_projects\": [\"/Users/me/code/app\"] } }",
+      "settings": [
+        "thread_control",
+        "thread_control_permissions",
+        "thread_control_projects",
+        "send_message",
+        "create_thread",
+        "cancel_turn",
+        "archive_thread",
+        "rename_thread",
+        "claim_thread"
+      ]
     },
     {
       "section": "stability",

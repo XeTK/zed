@@ -1666,6 +1666,10 @@ impl MessageEditor {
             .detach_and_log_err(cx);
     }
 
+    pub fn is_read_only(&self, cx: &App) -> bool {
+        self.editor.read(cx).read_only(cx)
+    }
+
     pub fn set_read_only(&mut self, read_only: bool, cx: &mut Context<Self>) {
         self.editor.update(cx, |message_editor, cx| {
             message_editor.set_read_only(read_only);
