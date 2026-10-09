@@ -78,6 +78,7 @@ multi_buffer.workspace = true
 notifications.workspace = true
 ordered-float.workspace = true
 parking_lot.workspace = true
+net.workspace = true
 paths.workspace = true
 picker.workspace = true
 platform_title_bar.workspace = true
