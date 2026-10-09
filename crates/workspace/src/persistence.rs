@@ -29,8 +29,9 @@ use project::{
 
 use language::{LanguageName, Toolchain, ToolchainScope};
 use remote::{
-    DockerConnectionOptions, RemoteConnectionIdentity, RemoteConnectionOptions,
-    SshConnectionOptions, WslConnectionOptions, remote_connection_identity,
+    DockerConnectionOptions, LocalProcessConnectionOptions, RemoteConnectionIdentity,
+    RemoteConnectionOptions, SshConnectionOptions, WslConnectionOptions,
+    remote_connection_identity,
 };
 use serde::{Deserialize, Serialize};
 use sqlez::{
@@ -1741,6 +1742,11 @@ impl WorkspaceDb {
                 name = Some(identity_name);
                 user = Some(remote_user);
             }
+            RemoteConnectionIdentity::LocalProcess { id } => {
+                kind = RemoteConnectionKind::LocalProcess;
+                name = Some(id);
+                user = None;
+            }
             #[cfg(any(test, feature = "test-support"))]
             RemoteConnectionIdentity::Mock { id } => {
                 kind = RemoteConnectionKind::Ssh;
@@ -2020,6 +2026,9 @@ impl WorkspaceDb {
                 username: user,
                 ..Default::default()
             })),
+            RemoteConnectionKind::LocalProcess => Some(RemoteConnectionOptions::LocalProcess(
+                LocalProcessConnectionOptions { id: name? },
+            )),
             RemoteConnectionKind::Docker => {
                 let remote_env: BTreeMap<String, String> =
                     serde_json::from_str(&remote_env?).ok()?;
@@ -4346,6 +4355,35 @@ mod tests {
             .unwrap();
 
         assert_eq!(connection_id, same_connection_id);
+    }
+
+    #[gpui::test]
+    async fn test_local_process_connection_round_trips() {
+        let db = WorkspaceDb::open_test_db("test_local_process_connection_round_trips").await;
+        let options = RemoteConnectionOptions::LocalProcess(LocalProcessConnectionOptions {
+            id: "my-app-0123456789abcdef".to_string(),
+        });
+
+        let id = db
+            .get_or_create_remote_connection(options.clone())
+            .await
+            .unwrap();
+        assert_eq!(db.remote_connection(id).unwrap(), options);
+        assert_eq!(
+            db.get_or_create_remote_connection(options).await.unwrap(),
+            id,
+            "the same project reuses its row"
+        );
+
+        let other = db
+            .get_or_create_remote_connection(RemoteConnectionOptions::LocalProcess(
+                LocalProcessConnectionOptions {
+                    id: "other-fedcba9876543210".to_string(),
+                },
+            ))
+            .await
+            .unwrap();
+        assert_ne!(other, id, "different projects get different rows");
     }
 
     #[gpui::test]

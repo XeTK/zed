@@ -2441,28 +2441,29 @@ impl Sidebar {
         }
     }
 
-    fn render_remote_project_icon(
+    /// The small icon beside a project's name showing what kind of project it is.
+    fn render_project_type_icon(
         &self,
         ix: usize,
         host: Option<&RemoteConnectionOptions>,
-    ) -> Option<AnyElement> {
-        let remote_icon_per_type = match host? {
-            RemoteConnectionOptions::Wsl(_) => IconName::Linux,
-            RemoteConnectionOptions::Docker(_) => IconName::Box,
-            _ => IconName::Server,
+    ) -> AnyElement {
+        let (icon, tooltip) = match host {
+            None => (IconName::Screen, "Local project"),
+            Some(RemoteConnectionOptions::Wsl(_)) => (IconName::Linux, "Remote project (WSL)"),
+            Some(RemoteConnectionOptions::Docker(_)) => {
+                (IconName::Box, "Remote project (container)")
+            }
+            Some(RemoteConnectionOptions::LocalProcess(_)) => {
+                (IconName::Blocks, "Local project in its own process")
+            }
+            Some(_) => (IconName::Server, "Remote project (SSH)"),
         };
 
-        Some(
-            div()
-                .id(format!("remote-project-icon-{}", ix))
-                .child(
-                    Icon::new(remote_icon_per_type)
-                        .size(IconSize::XSmall)
-                        .color(Color::Muted),
-                )
-                .tooltip(Tooltip::text("Remote Project"))
-                .into_any_element(),
-        )
+        div()
+            .id(format!("project-type-icon-{}", ix))
+            .child(Icon::new(icon).size(IconSize::XSmall).color(Color::Muted))
+            .tooltip(Tooltip::text(tooltip))
+            .into_any_element()
     }
 
     fn render_project_header(
@@ -2605,10 +2606,7 @@ impl Sidebar {
                     .w_full()
                     .gap_1()
                     .child(label)
-                    .when_some(
-                        self.render_remote_project_icon(ix, host.as_ref()),
-                        |this, icon| this.child(icon),
-                    )
+                    .child(self.render_project_type_icon(ix, host.as_ref()))
                     .when(is_collapsed, |this| {
                         this.when(has_running_threads, |this| {
                             this.child(

@@ -22,6 +22,14 @@ struct Cli {
 }
 
 fn main() -> anyhow::Result<()> {
+    // Before anything reads a path: a project's own server process is given its
+    // data directory this way.
+    if let Some(data_dir) = std::env::var_os(paths::REMOTE_SERVER_DATA_DIR_ENV_VAR)
+        && !data_dir.is_empty()
+    {
+        paths::set_isolated_server_dir(&data_dir.to_string_lossy());
+    }
+
     let cli = Cli::parse();
 
     if let Some(socket_path) = &cli.askpass {

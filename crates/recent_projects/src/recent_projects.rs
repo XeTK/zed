@@ -53,7 +53,14 @@ use zed_actions::{OpenDevContainer, OpenRecent, OpenRemote};
 
 actions!(
     recent_projects,
-    [ToggleActionsMenu, RemoveSelected, AddToWorkspace,]
+    [
+        ToggleActionsMenu,
+        RemoveSelected,
+        AddToWorkspace,
+        /// Opens a folder as a project whose backend runs in its own process on this machine,
+        /// so a crash there does not close the window. Experimental.
+        OpenFolderInSeparateProcess,
+    ]
 );
 
 #[derive(Clone, Debug)]
@@ -284,6 +291,50 @@ pub(crate) fn default_open_in_new_window(cx: &App) -> bool {
 }
 
 pub fn init(cx: &mut App) {
+    #[cfg(unix)]
+    cx.on_action(|_: &OpenFolderInSeparateProcess, cx| {
+        with_active_or_new_workspace(cx, move |workspace, window, cx| {
+            use gpui::PathPromptOptions;
+            use project::DirectoryLister;
+
+            let paths = workspace.prompt_for_open_path(
+                PathPromptOptions {
+                    files: false,
+                    directories: true,
+                    multiple: false,
+                    prompt: None,
+                },
+                DirectoryLister::Local(
+                    workspace.project().clone(),
+                    workspace.app_state().fs.clone(),
+                ),
+                window,
+                cx,
+            );
+
+            let app_state = workspace.app_state().clone();
+            let window_handle = window.window_handle().downcast::<MultiWorkspace>();
+            cx.spawn_in(window, async move |_, cx| {
+                let Some(paths) = paths.await.log_err().flatten() else {
+                    return;
+                };
+                let connection_options = RemoteConnectionOptions::LocalProcess(
+                    remote::LocalProcessConnectionOptions::for_paths(
+                        paths.iter().map(|path| path.as_path()),
+                    ),
+                );
+                let open_options = workspace::OpenOptions {
+                    requesting_window: window_handle,
+                    ..Default::default()
+                };
+                open_remote_project(connection_options, paths, app_state, open_options, cx)
+                    .await
+                    .log_err();
+            })
+            .detach();
+        });
+    });
+
     #[cfg(target_os = "windows")]
     cx.on_action(|open_wsl: &zed_actions::wsl_actions::OpenFolderInWsl, cx| {
         let create_new_window = open_wsl
@@ -2001,6 +2052,7 @@ pub(crate) fn icon_for_remote_connection(options: Option<&RemoteConnectionOption
             RemoteConnectionOptions::Ssh(_) => IconName::Server,
             RemoteConnectionOptions::Wsl(_) => IconName::Linux,
             RemoteConnectionOptions::Docker(_) => IconName::Box,
+            RemoteConnectionOptions::LocalProcess(_) => IconName::Blocks,
             #[cfg(any(test, feature = "test-support"))]
             RemoteConnectionOptions::Mock(_) => IconName::Server,
         },
