@@ -1,7 +1,8 @@
 //! A local control server that lets other programs, such as an MCP bridge,
-//! read the agent threads in this Zed.
+//! read the agent threads in this Zed and, if allowed, change them.
 //!
-//! It is off unless `agent.thread_control` says otherwise. When on, it listens
+//! It is off unless `agent.thread_control` says otherwise. Anything that changes
+//! a thread needs `read_write` and then its own permission (`policy`). When on, it listens
 //! on a Unix socket that only this user can use, and every request must carry
 //! the token written to `control.json` in the data directory. Requests and
 //! responses are single lines of JSON:
@@ -11,7 +12,11 @@
 //! {"ok": true, "result": {...}}   or   {"ok": false, "error": "..."}
 //! ```
 
+pub(crate) mod actions;
+mod policy;
+
 use crate::AgentPanel;
+use crate::conversation_view::ConversationView;
 use crate::thread_metadata_store::{ThreadMetadata, ThreadMetadataStore};
 use acp_thread::{AcpThread, ThreadStatus};
 use agent::ThreadStore;
@@ -21,6 +26,7 @@ use anyhow::{Context as _, Result, anyhow};
 use futures::{AsyncBufReadExt as _, AsyncWriteExt as _, StreamExt as _, io::BufReader};
 use gpui::{App, AsyncApp, Entity, Global, Task};
 use net::async_net::{UnixListener, UnixStream};
+use policy::Policy;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use settings::{Settings as _, ThreadControlMode};
@@ -208,13 +214,72 @@ fn tokens_match(given: &str, expected: &str) -> bool {
             == 0
 }
 
-async fn handle_request(method: &str, params: Value, cx: &mut AsyncApp) -> Result<Value> {
+pub(crate) async fn handle_request(
+    method: &str,
+    params: Value,
+    cx: &mut AsyncApp,
+) -> Result<Value> {
     match method {
         "list_projects" => cx.update(|cx| list_projects(cx)),
         "list_threads" => cx.update(|cx| list_threads(params, cx)),
         "get_thread" => get_thread(params, cx).await,
+        "get_permissions" => cx.update(|cx| Ok(Policy::current(cx).describe())),
+        "send_message" => actions::send_message(params, cx).await,
+        "create_thread" => actions::create_thread(params, cx).await,
+        "cancel_turn" => actions::cancel_turn(params, cx).await,
+        "archive_thread" => actions::archive_thread(params, cx).await,
+        "rename_thread" => actions::rename_thread(params, cx).await,
         other => Err(anyhow!("unknown method {other:?}")),
     }
+}
+
+/// The conversations open in an agent panel, with the window each is in.
+fn live_conversation_views(
+    cx: &App,
+) -> Vec<(gpui::WindowHandle<MultiWorkspace>, Entity<ConversationView>)> {
+    let mut views = Vec::new();
+    for window in cx.windows() {
+        let Some(window) = window.downcast::<MultiWorkspace>() else {
+            continue;
+        };
+        let Ok(multi_workspace) = window.read(cx) else {
+            continue;
+        };
+        for workspace in multi_workspace.workspaces() {
+            let Some(panel) = workspace.read(cx).panel::<AgentPanel>(cx) else {
+                continue;
+            };
+            for view in panel.read(cx).conversation_views() {
+                views.push((window, view));
+            }
+        }
+    }
+    views
+}
+
+/// A thread by id. A thread outside the folders thread control is limited to
+/// looks exactly like one that does not exist.
+fn find_thread_metadata(id: &str, cx: &App) -> Result<ThreadMetadata> {
+    let policy = Policy::current(cx);
+    ThreadMetadataStore::global(cx)
+        .read(cx)
+        .entries()
+        .find(|metadata| metadata.thread_id.to_key_string() == id)
+        .filter(|metadata| {
+            policy.includes(metadata.folder_paths().paths().iter().map(|p| p.as_path()))
+        })
+        .cloned()
+        .with_context(|| format!("no thread with id {id}"))
+}
+
+fn truncate_for_prompt(text: &str) -> String {
+    const MAX: usize = 600;
+    if text.chars().count() <= MAX {
+        return text.to_string();
+    }
+    let mut cut: String = text.chars().take(MAX).collect();
+    cut.push('…');
+    cut
 }
 
 fn workspaces(cx: &App) -> Vec<Entity<Workspace>> {
@@ -227,6 +292,7 @@ fn workspaces(cx: &App) -> Vec<Entity<Workspace>> {
 }
 
 fn list_projects(cx: &App) -> Result<Value> {
+    let policy = Policy::current(cx);
     let mut projects = Vec::new();
     for window in cx.windows() {
         let Some(window) = window.downcast::<MultiWorkspace>() else {
@@ -236,6 +302,9 @@ fn list_projects(cx: &App) -> Result<Value> {
             continue;
         };
         for group in multi_workspace.project_groups(cx) {
+            if !policy.includes(group.key.path_list().paths().iter().map(|p| p.as_path())) {
+                continue;
+            }
             let paths: Vec<_> = group
                 .key
                 .path_list()
@@ -302,11 +371,15 @@ fn list_threads(params: Value, cx: &App) -> Result<Value> {
         .unwrap_or(DEFAULT_THREAD_LIMIT)
         .min(MAX_THREAD_LIMIT);
     let statuses = live_statuses(cx);
+    let policy = Policy::current(cx);
     let store = ThreadMetadataStore::global(cx).read(cx);
 
     let mut threads: Vec<&ThreadMetadata> = store
         .entries()
         .filter(|metadata| params.include_archived || !metadata.archived)
+        .filter(|metadata| {
+            policy.includes(metadata.folder_paths().paths().iter().map(|p| p.as_path()))
+        })
         .filter(|metadata| {
             params.project.as_ref().is_none_or(|project| {
                 metadata
@@ -371,12 +444,7 @@ async fn get_thread(params: Value, cx: &mut AsyncApp) -> Result<Value> {
     }
 
     let (metadata, source) = cx.update(|cx| -> Result<_> {
-        let store = ThreadMetadataStore::global(cx).read(cx);
-        let metadata = store
-            .entries()
-            .find(|metadata| metadata.thread_id.to_key_string() == params.id)
-            .cloned()
-            .with_context(|| format!("no thread with id {}", params.id))?;
+        let metadata = find_thread_metadata(&params.id, cx)?;
 
         for workspace in workspaces(cx) {
             let Some(panel) = workspace.read(cx).panel::<AgentPanel>(cx) else {
