@@ -1,7 +1,8 @@
 //! The things the control server can do to threads. Every one checks its
 //! permission first, and an `ask` permission waits for you in Zed.
 
-use super::policy::{Capability, Policy, authorize};
+use super::claims::{self, DEFAULT_CLAIM, MAX_CLAIM};
+use super::policy::{Capability, Policy, authorize, ensure_not_denied};
 use super::{find_thread_metadata, live_conversation_views, truncate_for_prompt};
 use crate::thread_metadata_store::{ThreadId, ThreadMetadata, ThreadMetadataStore};
 use crate::{Agent, AgentInitialContent, AgentPanel, AgentThreadSource};
@@ -20,6 +21,36 @@ const OPEN_THREAD_TIMEOUT: Duration = Duration::from_secs(20);
 
 fn parse<T: for<'de> Deserialize<'de>>(params: Value, what: &str) -> Result<T> {
     serde_json::from_value(params).with_context(|| format!("{what} was given the wrong arguments"))
+}
+
+fn client_of(params: &Value) -> String {
+    params["_client"]
+        .as_str()
+        .unwrap_or("an MCP client")
+        .to_string()
+}
+
+/// A thread another program is driving must not be changed by a different one.
+fn ensure_not_driven_by_another(
+    metadata: &ThreadMetadata,
+    params: &Value,
+    cx: &mut AsyncApp,
+) -> Result<()> {
+    let client = client_of(params);
+    match cx.update(|cx| claims::holder(metadata.thread_id, cx)) {
+        Some(holder) if holder != client => bail!(
+            "\"{}\" is being driven by {holder}. Ask the person to take it back in Zed, or wait for {holder} to release it.",
+            metadata.display_title()
+        ),
+        _ => Ok(()),
+    }
+}
+
+fn holds_claim(metadata: &ThreadMetadata, params: &Value, cx: &mut AsyncApp) -> bool {
+    let client = client_of(params);
+    cx.update(|cx| claims::holder(metadata.thread_id, cx))
+        .as_deref()
+        == Some(client.as_str())
 }
 
 fn check_text(text: &str, what: &str) -> Result<String> {
@@ -49,25 +80,32 @@ struct SendMessageParams {
     text: String,
 }
 
-pub async fn send_message(params: Value, cx: &mut AsyncApp) -> Result<Value> {
-    let params: SendMessageParams = parse(params, "send_message")?;
+pub async fn send_message(raw: Value, cx: &mut AsyncApp) -> Result<Value> {
+    let params: SendMessageParams = parse(raw.clone(), "send_message")?;
     let text = check_text(&params.text, "the message")?;
     let metadata = cx.update(|cx| find_thread_metadata(&params.id, cx))?;
     if metadata.is_draft() {
         bail!("this thread is a draft; use create_thread to start one");
     }
 
-    authorize(
-        Capability::SendMessage,
-        format!(
-            "Send a message to \"{}\" ({}):\n\n{}",
-            metadata.display_title(),
-            describe_folders(&metadata),
-            truncate_for_prompt(&text)
-        ),
-        cx,
-    )
-    .await?;
+    ensure_not_driven_by_another(&metadata, &raw, cx)?;
+    // A client that holds the claim was approved when it took the thread over,
+    // so each message does not ask again.
+    if holds_claim(&metadata, &raw, cx) {
+        ensure_not_denied(Capability::SendMessage, cx).await?;
+    } else {
+        authorize(
+            Capability::SendMessage,
+            format!(
+                "Send a message to \"{}\" ({}):\n\n{}",
+                metadata.display_title(),
+                describe_folders(&metadata),
+                truncate_for_prompt(&text)
+            ),
+            cx,
+        )
+        .await?;
+    }
 
     let (window, view) = open_thread_view(&metadata, cx).await?;
     window
@@ -87,6 +125,11 @@ pub async fn send_message(params: Value, cx: &mut AsyncApp) -> Result<Value> {
             })
         })
         .map_err(|_| anyhow!("the window closed"))??;
+    // Each message keeps a claim alive.
+    if holds_claim(&metadata, &raw, cx) {
+        let client = client_of(&raw);
+        cx.update(|cx| claims::claim(metadata.thread_id, &client, DEFAULT_CLAIM, cx))?;
+    }
     Ok(json!({ "sent": true, "id": params.id }))
 }
 
@@ -259,9 +302,10 @@ struct ThreadIdParams {
     id: String,
 }
 
-pub async fn cancel_turn(params: Value, cx: &mut AsyncApp) -> Result<Value> {
-    let params: ThreadIdParams = parse(params, "cancel_turn")?;
+pub async fn cancel_turn(raw: Value, cx: &mut AsyncApp) -> Result<Value> {
+    let params: ThreadIdParams = parse(raw.clone(), "cancel_turn")?;
     let metadata = cx.update(|cx| find_thread_metadata(&params.id, cx))?;
+    ensure_not_driven_by_another(&metadata, &raw, cx)?;
     let thread = cx
         .update(|cx| {
             live_conversation_views(cx)
@@ -274,12 +318,16 @@ pub async fn cancel_turn(params: Value, cx: &mut AsyncApp) -> Result<Value> {
         bail!("nothing is running in this thread");
     }
 
-    authorize(
-        Capability::CancelTurn,
-        format!("Stop the agent running in \"{}\"", metadata.display_title()),
-        cx,
-    )
-    .await?;
+    if holds_claim(&metadata, &raw, cx) {
+        ensure_not_denied(Capability::CancelTurn, cx).await?;
+    } else {
+        authorize(
+            Capability::CancelTurn,
+            format!("Stop the agent running in \"{}\"", metadata.display_title()),
+            cx,
+        )
+        .await?;
+    }
 
     let cancelled = thread.update(cx, |thread, cx| thread.cancel(cx));
     cancelled.await;
@@ -298,9 +346,10 @@ fn archive_by_default() -> bool {
     true
 }
 
-pub async fn archive_thread(params: Value, cx: &mut AsyncApp) -> Result<Value> {
-    let params: ArchiveThreadParams = parse(params, "archive_thread")?;
+pub async fn archive_thread(raw: Value, cx: &mut AsyncApp) -> Result<Value> {
+    let params: ArchiveThreadParams = parse(raw.clone(), "archive_thread")?;
     let metadata = cx.update(|cx| find_thread_metadata(&params.id, cx))?;
+    ensure_not_driven_by_another(&metadata, &raw, cx)?;
 
     authorize(
         Capability::ArchiveThread,
@@ -335,13 +384,14 @@ struct RenameThreadParams {
     title: String,
 }
 
-pub async fn rename_thread(params: Value, cx: &mut AsyncApp) -> Result<Value> {
-    let params: RenameThreadParams = parse(params, "rename_thread")?;
+pub async fn rename_thread(raw: Value, cx: &mut AsyncApp) -> Result<Value> {
+    let params: RenameThreadParams = parse(raw.clone(), "rename_thread")?;
     let title = check_text(&params.title, "the title")?;
     if title.len() > 200 || title.contains('\n') {
         bail!("the title must be one line of at most 200 characters");
     }
     let metadata = cx.update(|cx| find_thread_metadata(&params.id, cx))?;
+    ensure_not_driven_by_another(&metadata, &raw, cx)?;
 
     authorize(
         Capability::RenameThread,
@@ -356,4 +406,57 @@ pub async fn rename_thread(params: Value, cx: &mut AsyncApp) -> Result<Value> {
         });
     });
     Ok(json!({ "id": params.id, "title": title }))
+}
+
+#[derive(Deserialize)]
+struct ClaimThreadParams {
+    id: String,
+    /// How long the claim lasts without another message; 10 by default.
+    minutes: Option<u64>,
+}
+
+pub async fn claim_thread(raw: Value, cx: &mut AsyncApp) -> Result<Value> {
+    let params: ClaimThreadParams = parse(raw.clone(), "claim_thread")?;
+    let client = client_of(&raw);
+    let duration = params
+        .minutes
+        .map(|minutes| Duration::from_secs(minutes.clamp(1, MAX_CLAIM.as_secs() / 60) * 60))
+        .unwrap_or(DEFAULT_CLAIM);
+    let metadata = cx.update(|cx| find_thread_metadata(&params.id, cx))?;
+    if metadata.is_draft() {
+        bail!("this thread is a draft; use create_thread to start one");
+    }
+    ensure_not_driven_by_another(&metadata, &raw, cx)?;
+
+    if !holds_claim(&metadata, &raw, cx) {
+        authorize(
+            Capability::ClaimThread,
+            format!(
+                "Let {client} take over \"{}\" ({}).\n\nIt will be the one sending this thread messages, and the thread's own message box is locked until it hands the thread back, you take it back, or {} minutes pass.",
+                metadata.display_title(),
+                describe_folders(&metadata),
+                duration.as_secs() / 60
+            ),
+            cx,
+        )
+        .await?;
+    }
+
+    // Open it first, so the lock and the banner show where you are looking.
+    open_thread_view(&metadata, cx).await?;
+    cx.update(|cx| claims::claim(metadata.thread_id, &client, duration, cx))?;
+    Ok(json!({
+        "claimed": true,
+        "id": params.id,
+        "minutes": duration.as_secs() / 60,
+        "note": "Each message you send keeps the claim alive. Call release_thread when you are done."
+    }))
+}
+
+pub async fn release_thread(raw: Value, cx: &mut AsyncApp) -> Result<Value> {
+    let params: ThreadIdParams = parse(raw.clone(), "release_thread")?;
+    let client = client_of(&raw);
+    let metadata = cx.update(|cx| find_thread_metadata(&params.id, cx))?;
+    let released = cx.update(|cx| claims::release(metadata.thread_id, Some(&client), cx));
+    Ok(json!({ "released": released, "id": params.id }))
 }

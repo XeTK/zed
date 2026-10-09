@@ -11471,6 +11471,7 @@ mod tests {
                     let agent = content.agent.get_or_insert_default();
                     agent.thread_control = Some(mode);
                     agent.thread_control_permissions = Some(Permissions {
+                        claim_thread: Some(permission),
                         send_message: Some(permission),
                         create_thread: Some(permission),
                         cancel_turn: Some(permission),
@@ -11728,6 +11729,213 @@ mod tests {
             .find(|thread| thread["id"] == thread_id.to_key_string().as_str())
             .expect("the thread is listed");
         assert_eq!(entry["open"], false, "it was read, not opened");
+    }
+
+    fn composer_is_locked(panel: &Entity<AgentPanel>, cx: &mut VisualTestContext) -> bool {
+        panel.read_with(cx, |panel, cx| {
+            let view = panel.active_thread_view(cx).expect("a thread is open");
+            view.read(cx).message_editor.read(cx).is_read_only(cx)
+        })
+    }
+
+    fn claim_holder(thread_id: &str, cx: &mut VisualTestContext) -> Option<String> {
+        cx.update(|_, cx| {
+            let thread_id = ThreadMetadataStore::global(cx)
+                .read(cx)
+                .entries()
+                .find(|metadata| metadata.thread_id.to_key_string() == thread_id)
+                .map(|metadata| metadata.thread_id)
+                .expect("thread is saved");
+            crate::thread_control::claims::holder(thread_id, cx)
+        })
+    }
+
+    #[gpui::test]
+    async fn test_claiming_a_thread_locks_the_message_box_until_released(cx: &mut TestAppContext) {
+        use settings::{ThreadControlMode, ThreadControlPermission};
+        let (panel, mut cx, thread_id) = setup_panel_with_thread(cx).await;
+        cx.update(|_, cx| crate::thread_control::claims::init(cx));
+        set_thread_control(
+            ThreadControlMode::ReadWrite,
+            ThreadControlPermission::Allow,
+            &[],
+            &mut cx,
+        );
+        assert!(!composer_is_locked(&panel, &mut cx));
+
+        control_call(
+            "claim_thread",
+            json!({ "id": thread_id.clone(), "_client": "Claude" }),
+            &mut cx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(claim_holder(&thread_id, &mut cx).as_deref(), Some("Claude"));
+        assert!(
+            composer_is_locked(&panel, &mut cx),
+            "the message box is locked"
+        );
+        let listed = control_call("list_threads", json!({}), &mut cx)
+            .await
+            .unwrap();
+        assert_eq!(listed["threads"][0]["claimed_by"], "Claude");
+
+        // Typing and sending in Zed does nothing while it is claimed.
+        panel.update_in(&mut cx, |panel, window, cx| {
+            let view = panel.active_thread_view(cx).unwrap();
+            view.update(cx, |view, cx| {
+                view.message_editor
+                    .update(cx, |editor, cx| editor.set_text("hello", window, cx));
+                view.send(window, cx);
+            });
+        });
+        cx.run_until_parked();
+        let user_messages = panel.read_with(&cx, |panel, cx| {
+            panel
+                .active_thread_view(cx)
+                .unwrap()
+                .read(cx)
+                .thread
+                .read(cx)
+                .entries()
+                .iter()
+                .filter(|entry| matches!(entry, acp_thread::AgentThreadEntry::UserMessage(_)))
+                .count()
+        });
+        assert_eq!(user_messages, 0, "Zed's own send is ignored while claimed");
+
+        // Only the holder can release it; a different program cannot.
+        let released = control_call(
+            "release_thread",
+            json!({ "id": thread_id.clone(), "_client": "Someone else" }),
+            &mut cx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(released["released"], false);
+        assert!(composer_is_locked(&panel, &mut cx));
+
+        let released = control_call(
+            "release_thread",
+            json!({ "id": thread_id.clone(), "_client": "Claude" }),
+            &mut cx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(released["released"], true);
+        assert_eq!(claim_holder(&thread_id, &mut cx), None);
+        assert!(
+            !composer_is_locked(&panel, &mut cx),
+            "the message box is unlocked"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_taking_a_thread_back_unlocks_it(cx: &mut TestAppContext) {
+        use settings::{ThreadControlMode, ThreadControlPermission};
+        let (panel, mut cx, thread_id) = setup_panel_with_thread(cx).await;
+        cx.update(|_, cx| crate::thread_control::claims::init(cx));
+        set_thread_control(
+            ThreadControlMode::ReadWrite,
+            ThreadControlPermission::Allow,
+            &[],
+            &mut cx,
+        );
+        control_call(
+            "claim_thread",
+            json!({ "id": thread_id.clone(), "_client": "Claude" }),
+            &mut cx,
+        )
+        .await
+        .unwrap();
+        assert!(composer_is_locked(&panel, &mut cx));
+
+        cx.update(|_, cx| {
+            let thread_id = panel
+                .read(cx)
+                .active_conversation_view()
+                .unwrap()
+                .read(cx)
+                .thread_id;
+            crate::thread_control::claims::release(thread_id, None, cx);
+        });
+        cx.run_until_parked();
+        assert!(!composer_is_locked(&panel, &mut cx));
+    }
+
+    #[gpui::test]
+    async fn test_a_claimed_thread_is_driven_by_one_program_at_a_time(cx: &mut TestAppContext) {
+        use settings::{ThreadControlMode, ThreadControlPermission};
+        let (panel, mut cx, thread_id) = setup_panel_with_thread(cx).await;
+        cx.update(|_, cx| crate::thread_control::claims::init(cx));
+        set_thread_control(
+            ThreadControlMode::ReadWrite,
+            ThreadControlPermission::Ask,
+            &[],
+            &mut cx,
+        );
+
+        // Claiming asks you once.
+        let task = start_control_call(
+            "claim_thread",
+            json!({ "id": thread_id.clone(), "_client": "Claude" }),
+            &mut cx,
+        );
+        cx.run_until_parked();
+        assert!(cx.has_pending_prompt());
+        cx.simulate_prompt_answer("Allow");
+        task.await.unwrap();
+
+        // Another program is turned away from everything that changes the thread.
+        for (method, extra) in [
+            ("claim_thread", json!({})),
+            ("send_message", json!({ "text": "hi" })),
+            ("cancel_turn", json!({})),
+            ("archive_thread", json!({})),
+            ("rename_thread", json!({ "title": "x" })),
+        ] {
+            let mut params = json!({ "id": thread_id.clone(), "_client": "Other" });
+            params
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let error = control_call(method, params, &mut cx).await.unwrap_err();
+            assert!(
+                error.to_string().contains("being driven by Claude"),
+                "{method}: {error}"
+            );
+        }
+        assert!(
+            !cx.has_pending_prompt(),
+            "refusing another program does not ask you"
+        );
+
+        // The holder sends without being asked again, and the claim is kept.
+        control_call(
+            "send_message",
+            json!({ "id": thread_id.clone(), "text": "go ahead", "_client": "Claude" }),
+            &mut cx,
+        )
+        .await
+        .unwrap();
+        assert!(
+            !cx.has_pending_prompt(),
+            "a message from the holder does not ask"
+        );
+        cx.run_until_parked();
+        let sent = panel.read_with(&cx, |panel, cx| {
+            panel
+                .active_thread_view(cx)
+                .unwrap()
+                .read(cx)
+                .thread
+                .read(cx)
+                .entries()
+                .iter()
+                .any(|entry| matches!(entry, acp_thread::AgentThreadEntry::UserMessage(_)))
+        });
+        assert!(sent, "the holder's message went through");
+        assert_eq!(claim_holder(&thread_id, &mut cx).as_deref(), Some("Claude"));
     }
 
     #[gpui::test]

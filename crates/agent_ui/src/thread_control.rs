@@ -13,6 +13,7 @@
 //! ```
 
 pub(crate) mod actions;
+pub(crate) mod claims;
 mod policy;
 
 use crate::AgentPanel;
@@ -41,6 +42,7 @@ const MAX_ENTRY_CHARS: usize = 20_000;
 const MAX_REQUEST_BYTES: u64 = 1024 * 1024;
 
 pub fn init(cx: &mut App) {
+    claims::init(cx);
     cx.set_global(ControlServer::default());
     apply_settings(cx);
     cx.observe_global::<settings::SettingsStore>(apply_settings)
@@ -172,6 +174,9 @@ fn restrict_to_owner(path: &std::path::Path) -> Result<()> {
 #[derive(Deserialize)]
 struct Request {
     token: String,
+    /// Which program is asking, as it named itself.
+    #[serde(default)]
+    client: Option<String>,
     method: String,
     #[serde(default)]
     params: Value,
@@ -188,7 +193,13 @@ async fn serve_connection(stream: UnixStream, token: &str, cx: &mut AsyncApp) ->
         let response = match serde_json::from_str::<Request>(&line) {
             Err(error) => error_response(&format!("invalid request: {error}")),
             Ok(request) if !tokens_match(&request.token, token) => error_response("invalid token"),
-            Ok(request) => match handle_request(&request.method, request.params, cx).await {
+            Ok(request) => match handle_request(
+                &request.method,
+                with_client(request.params, request.client),
+                cx,
+            )
+            .await
+            {
                 Ok(result) => json!({ "ok": true, "result": result }),
                 Err(error) => error_response(&format!("{error:#}")),
             },
@@ -198,6 +209,20 @@ async fn serve_connection(stream: UnixStream, token: &str, cx: &mut AsyncApp) ->
         writer.write_all(&bytes).await?;
     }
     Ok(())
+}
+
+/// Adds who is asking to the parameters, under a name no tool uses.
+fn with_client(params: Value, client: Option<String>) -> Value {
+    let mut params = match params {
+        Value::Object(params) => params,
+        _ => serde_json::Map::new(),
+    };
+    let client = client
+        .map(|client| client.trim().chars().take(60).collect::<String>())
+        .filter(|client| !client.is_empty())
+        .unwrap_or_else(|| "an MCP client".to_string());
+    params.insert("_client".to_string(), Value::String(client));
+    Value::Object(params)
 }
 
 fn error_response(message: &str) -> Value {
@@ -224,6 +249,8 @@ pub(crate) async fn handle_request(
         "list_threads" => cx.update(|cx| list_threads(params, cx)),
         "get_thread" => get_thread(params, cx).await,
         "get_permissions" => cx.update(|cx| Ok(Policy::current(cx).describe())),
+        "claim_thread" => actions::claim_thread(params, cx).await,
+        "release_thread" => actions::release_thread(params, cx).await,
         "send_message" => actions::send_message(params, cx).await,
         "create_thread" => actions::create_thread(params, cx).await,
         "cancel_turn" => actions::cancel_turn(params, cx).await,
@@ -407,6 +434,7 @@ fn list_threads(params: Value, cx: &App) -> Result<Value> {
                 "open": statuses.contains_key(&metadata.thread_id),
                 "draft": metadata.is_draft(),
                 "archived": metadata.archived,
+                "claimed_by": claims::holder(metadata.thread_id, cx),
                 "created_at": metadata.created_at,
                 "updated_at": metadata.updated_at,
                 "last_interacted_at": metadata.interacted_at,
@@ -532,6 +560,7 @@ async fn get_thread(params: Value, cx: &mut AsyncApp) -> Result<Value> {
         "agent": metadata.agent_id.to_string(),
         "status": status,
         "archived": metadata.archived,
+        "claimed_by": cx.update(|cx| claims::holder(metadata.thread_id, cx)),
         "total_entries": total_entries,
         "offset": params.offset,
         "entries": entries,

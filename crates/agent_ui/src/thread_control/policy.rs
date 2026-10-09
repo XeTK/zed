@@ -11,6 +11,7 @@ use workspace::MultiWorkspace;
 /// A thing that changes a thread. Each has its own permission setting.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Capability {
+    ClaimThread,
     SendMessage,
     CreateThread,
     CancelTurn,
@@ -19,7 +20,8 @@ pub enum Capability {
 }
 
 impl Capability {
-    pub const ALL: [Capability; 5] = [
+    pub const ALL: [Capability; 6] = [
+        Capability::ClaimThread,
         Capability::SendMessage,
         Capability::CreateThread,
         Capability::CancelTurn,
@@ -30,6 +32,7 @@ impl Capability {
     /// The name used both for the setting and for the tool offered to MCP clients.
     pub fn name(self) -> &'static str {
         match self {
+            Capability::ClaimThread => "claim_thread",
             Capability::SendMessage => "send_message",
             Capability::CreateThread => "create_thread",
             Capability::CancelTurn => "cancel_turn",
@@ -80,6 +83,7 @@ impl Policy {
             return ThreadControlPermission::Deny;
         }
         match capability {
+            Capability::ClaimThread => self.permissions.claim_thread,
             Capability::SendMessage => self.permissions.send_message,
             Capability::CreateThread => self.permissions.create_thread,
             Capability::CancelTurn => self.permissions.cancel_turn,
@@ -125,6 +129,19 @@ impl Policy {
             "projects": self.projects,
         })
     }
+}
+
+/// For an action that is covered by a claim the person already approved: it
+/// goes ahead unless the permission is `deny`, without asking again.
+pub async fn ensure_not_denied(capability: Capability, cx: &mut AsyncApp) -> Result<()> {
+    let permission = cx.update(|cx| Policy::current(cx).permission(capability));
+    if permission == ThreadControlPermission::Deny {
+        bail!(
+            "{} is not allowed. Zed's agent.thread_control and agent.thread_control_permissions settings decide this.",
+            capability.name()
+        );
+    }
+    Ok(())
 }
 
 /// Decides whether `capability` may go ahead. `summary` says what is about to
@@ -222,6 +239,7 @@ mod tests {
         let policy = Policy::new(
             ThreadControlMode::ReadWrite,
             ThreadControlPermissions {
+                claim_thread: ThreadControlPermission::Ask,
                 send_message: ThreadControlPermission::Allow,
                 create_thread: ThreadControlPermission::Deny,
                 cancel_turn: ThreadControlPermission::Ask,
@@ -237,6 +255,7 @@ mod tests {
         assert_eq!(
             granted,
             [
+                ("claim_thread", ThreadControlPermission::Ask),
                 ("send_message", ThreadControlPermission::Allow),
                 ("create_thread", ThreadControlPermission::Deny),
                 ("cancel_turn", ThreadControlPermission::Ask),
