@@ -22,12 +22,20 @@ pub fn run() -> Result<()> {
     {
         let stdin = std::io::stdin();
         let mut stdout = std::io::stdout().lock();
+        // What the client called itself when it said hello. Zed shows it when it
+        // asks you to approve something and when a thread is being driven.
+        let mut client: Option<String> = None;
         for line in stdin.lock().lines() {
             let line = line?;
             if line.trim().is_empty() {
                 continue;
             }
-            let Some(response) = handle_line(&line, &control_call) else {
+            let name = client.clone();
+            let Some(response) = handle_line(
+                &line,
+                &|method, params| control_call(method, params, name.as_deref()),
+                &mut client,
+            ) else {
                 continue;
             };
             writeln!(stdout, "{response}")?;
@@ -39,7 +47,11 @@ pub fn run() -> Result<()> {
 
 /// Handles one JSON-RPC message. `call` forwards a tool to the control server.
 /// Returns `None` for notifications, which get no reply.
-fn handle_line(line: &str, call: &dyn Fn(&str, Value) -> Result<Value>) -> Option<Value> {
+fn handle_line(
+    line: &str,
+    call: &dyn Fn(&str, Value) -> Result<Value>,
+    client: &mut Option<String>,
+) -> Option<Value> {
     let message: Value = match serde_json::from_str(line) {
         Ok(message) => message,
         Err(error) => {
@@ -63,18 +75,25 @@ fn handle_line(line: &str, call: &dyn Fn(&str, Value) -> Result<Value>) -> Optio
     };
 
     Some(match method {
-        "initialize" => ok_reply(
-            id,
-            json!({
-                "protocolVersion": params
-                    .get("protocolVersion")
-                    .and_then(Value::as_str)
-                    .unwrap_or(PROTOCOL_VERSION),
-                "capabilities": { "tools": {} },
-                "serverInfo": { "name": "zed-threads", "version": env!("CARGO_PKG_VERSION") },
-                "instructions": "Read the agent threads open in Zed. Zed must have agent.thread_control set to read_only.",
-            }),
-        ),
+        "initialize" => {
+            *client = params["clientInfo"]["name"]
+                .as_str()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_string);
+            ok_reply(
+                id,
+                json!({
+                    "protocolVersion": params
+                        .get("protocolVersion")
+                        .and_then(Value::as_str)
+                        .unwrap_or(PROTOCOL_VERSION),
+                    "capabilities": { "tools": {} },
+                    "serverInfo": { "name": "zed-threads", "version": env!("CARGO_PKG_VERSION") },
+                    "instructions": "Read and, if the person allows it, drive the agent threads in Zed. Zed must have agent.thread_control turned on. To work on a thread with send_message, call claim_thread first (the person approves it), which locks Zed's own message box while you work, and call release_thread when you are done.",
+                }),
+            )
+        }
         "ping" => ok_reply(id, json!({})),
         "tools/list" => ok_reply(id, json!({ "tools": offered_tools(call) })),
         "tools/call" => {
@@ -126,6 +145,12 @@ fn offered_tools(call: &dyn Fn(&str, Value) -> Result<Value>) -> Vec<Value> {
             let name = tool["name"].as_str().unwrap_or_default();
             tool["annotations"]["readOnlyHint"] == true
                 || permissions.as_ref().is_some_and(|permissions| {
+                    // Handing a thread back is offered whenever taking one is.
+                    let name = if name == "release_thread" {
+                        "claim_thread"
+                    } else {
+                        name
+                    };
                     permissions["permissions"][name]
                         .as_str()
                         .is_some_and(|permission| permission != "deny")
@@ -170,6 +195,29 @@ fn all_tools() -> Vec<Value> {
                 "required": ["id"],
             },
             "annotations": read_only,
+        }),
+        json!({
+            "name": "claim_thread",
+            "description": "Take over a Zed agent thread, so you are the one sending it messages. Zed asks the person first, shows that you are driving it, and locks the thread's own message box so you do not both write to the same session. Each message you send keeps the claim alive for 10 minutes. Call release_thread when you are done.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "A thread id from list_threads." },
+                    "minutes": { "type": "integer", "description": "How long the claim lasts without another message. Default 10, at most 60." },
+                },
+                "required": ["id"],
+            },
+            "annotations": changes_a_thread,
+        }),
+        json!({
+            "name": "release_thread",
+            "description": "Hand a thread you claimed back to the person, unlocking Zed's message box.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "id": { "type": "string", "description": "A thread id from list_threads." } },
+                "required": ["id"],
+            },
+            "annotations": changes_a_thread,
         }),
         json!({
             "name": "send_message",
@@ -238,8 +286,13 @@ fn all_tools() -> Vec<Value> {
 }
 
 #[cfg(unix)]
-fn control_call(method: &str, params: Value) -> Result<Value> {
-    call_control_server(&paths::data_dir().join("control.json"), method, params)
+fn control_call(method: &str, params: Value, client: Option<&str>) -> Result<Value> {
+    call_control_server(
+        &paths::data_dir().join("control.json"),
+        method,
+        params,
+        client,
+    )
 }
 
 #[cfg(unix)]
@@ -247,6 +300,7 @@ fn call_control_server(
     discovery_path: &std::path::Path,
     method: &str,
     params: Value,
+    client: Option<&str>,
 ) -> Result<Value> {
     use std::os::unix::net::UnixStream;
 
@@ -282,7 +336,7 @@ fn call_control_server(
     writeln!(
         writer,
         "{}",
-        json!({ "token": token, "method": method, "params": params })
+        json!({ "token": token, "client": client, "method": method, "params": params })
     )?;
     let mut response = String::new();
     std::io::BufReader::new(stream).read_line(&mut response)?;
@@ -304,7 +358,7 @@ mod tests {
     use super::*;
 
     fn reply(line: &str, call: &dyn Fn(&str, Value) -> Result<Value>) -> Value {
-        handle_line(line, call).expect("a reply")
+        handle_line(line, call, &mut None).expect("a reply")
     }
 
     fn unused(_: &str, _: Value) -> Result<Value> {
@@ -328,7 +382,8 @@ mod tests {
         assert!(
             handle_line(
                 r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
-                &unused
+                &unused,
+                &mut None
             )
             .is_none()
         );
@@ -369,8 +424,8 @@ mod tests {
     #[test]
     fn test_write_tools_are_offered_one_by_one_as_permitted() {
         let permissions = json!({ "mode": "read_write", "permissions": {
-            "send_message": "ask", "create_thread": "deny", "cancel_turn": "allow",
-            "archive_thread": "deny", "rename_thread": "deny" } });
+            "claim_thread": "deny", "send_message": "ask", "create_thread": "deny",
+            "cancel_turn": "allow", "archive_thread": "deny", "rename_thread": "deny" } });
         assert_eq!(
             tool_names(Ok(permissions)),
             [
@@ -384,9 +439,54 @@ mod tests {
     }
 
     #[test]
+    fn test_taking_a_thread_over_is_offered_together_with_handing_it_back() {
+        let allowed = json!({ "mode": "read_write", "permissions": {
+            "claim_thread": "ask", "send_message": "deny", "create_thread": "deny",
+            "cancel_turn": "deny", "archive_thread": "deny", "rename_thread": "deny" } });
+        assert_eq!(
+            tool_names(Ok(allowed)),
+            [
+                "list_projects",
+                "list_threads",
+                "get_thread",
+                "claim_thread",
+                "release_thread"
+            ]
+        );
+        let denied = json!({ "mode": "read_write", "permissions": {
+            "claim_thread": "deny", "send_message": "ask" } });
+        let names = tool_names(Ok(denied));
+        assert!(!names.contains(&"claim_thread".to_string()));
+        assert!(!names.contains(&"release_thread".to_string()));
+        assert!(names.contains(&"send_message".to_string()));
+    }
+
+    #[test]
+    fn test_the_clients_name_from_initialize_is_remembered() {
+        let mut client = None;
+        handle_line(
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":" Claude Desktop "}}}"#,
+            &unused,
+            &mut client,
+        )
+        .unwrap();
+        assert_eq!(client.as_deref(), Some("Claude Desktop"));
+
+        // A client that does not say who it is leaves it unset.
+        let mut client = Some("stale".to_string());
+        handle_line(
+            r#"{"jsonrpc":"2.0","id":2,"method":"initialize","params":{}}"#,
+            &unused,
+            &mut client,
+        )
+        .unwrap();
+        assert_eq!(client, None);
+    }
+
+    #[test]
     fn test_tools_have_schemas_and_say_whether_they_change_anything() {
         let all = all_tools();
-        assert_eq!(all.len(), 8);
+        assert_eq!(all.len(), 10);
         for tool in &all {
             assert_eq!(tool["inputSchema"]["type"], "object", "{}", tool["name"]);
             let reads = READ_TOOLS.contains(&tool["name"].as_str().unwrap());
@@ -401,6 +501,8 @@ mod tests {
         };
         assert_eq!(required("get_thread"), json!(["id"]));
         assert_eq!(required("send_message"), json!(["id", "text"]));
+        assert_eq!(required("claim_thread"), json!(["id"]));
+        assert_eq!(required("release_thread"), json!(["id"]));
         assert_eq!(required("create_thread"), json!(["project", "text"]));
     }
 
@@ -485,18 +587,23 @@ mod tests {
                 .unwrap();
             let request: Value = serde_json::from_str(&line).unwrap();
             let response = if request["token"] == "secret" {
-                json!({ "ok": true, "result": { "echo": request["method"], "params": request["params"] } })
+                json!({ "ok": true, "result": { "echo": request["method"], "params": request["params"], "client": request["client"] } })
             } else {
                 json!({ "ok": false, "error": "invalid token" })
             };
             writeln!(writer, "{response}").unwrap();
         });
 
-        let result =
-            call_control_server(&discovery, "list_threads", json!({ "limit": 2 })).unwrap();
+        let result = call_control_server(
+            &discovery,
+            "list_threads",
+            json!({ "limit": 2 }),
+            Some("Claude"),
+        )
+        .unwrap();
         assert_eq!(
             result,
-            json!({ "echo": "list_threads", "params": { "limit": 2 } })
+            json!({ "echo": "list_threads", "params": { "limit": 2 }, "client": "Claude" })
         );
         server.join().unwrap();
     }
@@ -509,6 +616,7 @@ mod tests {
             &directory.path().join("control.json"),
             "list_threads",
             json!({}),
+            None,
         )
         .unwrap_err();
         assert!(
