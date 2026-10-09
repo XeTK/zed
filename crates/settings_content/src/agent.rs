@@ -98,6 +98,31 @@ pub enum MessageTimestamps {
     Always,
 }
 
+/// Whether other programs, such as an MCP bridge, may use the agent threads
+/// in this Zed.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+    MergeFrom,
+    strum::VariantArray,
+    strum::VariantNames,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadControlMode {
+    /// Nothing is listening.
+    #[default]
+    Off,
+    /// Other programs on this machine can list and read threads, but not change them.
+    ReadOnly,
+}
+
 /// Threshold at which agent auto-compaction runs. See
 /// [`AutoCompactSettingsContent::threshold`] for the accepted formats.
 ///
@@ -392,6 +417,12 @@ pub struct AgentSettingsContent {
     ///
     /// Default: on_hover
     pub message_timestamps: Option<MessageTimestamps>,
+    /// Whether other programs on this machine, such as an MCP bridge started with
+    /// `zed --mcp`, may use the agent threads in this Zed. They need the token that
+    /// Zed writes to `control.json` in its data directory.
+    ///
+    /// Default: off
+    pub thread_control: Option<ThreadControlMode>,
     /// Whether clicking the stop button on a running terminal tool should also cancel the agent's generation.
     /// Note that this only applies to the stop button, not to ctrl+c inside the terminal.
     ///

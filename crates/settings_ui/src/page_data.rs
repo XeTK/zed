@@ -9103,6 +9103,22 @@ fn ai_page(cx: &App) -> SettingsPage {
                 files: USER,
             }),
             SettingsPageItem::SettingItem(SettingItem {
+                title: "Thread Control",
+                description: "Whether other programs on this machine, such as an MCP bridge, may list and read agent threads. They need the token in control.json in Zed's data directory.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("agent.thread_control"),
+                    pick: |settings_content| {
+                        settings_content.agent.as_ref()?.thread_control.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content.agent.get_or_insert_default().thread_control = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
                 title: "Cancel Generation On Terminal Stop",
                 description: "Whether clicking the stop button on a running terminal tool should also cancel the agent's generation. Note that this only applies to the stop button, not to ctrl+c inside the terminal.",
                 field: Box::new(SettingField {
