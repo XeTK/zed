@@ -644,6 +644,9 @@ pub struct ThreadView {
     pub hovered_edited_file_buttons: Option<usize>,
     pub in_flight_prompt: Option<Vec<acp::ContentBlock>>,
     pub _subscriptions: Vec<Subscription>,
+    /// Whether another program has claimed this thread, which locks the message
+    /// box. See `thread_control::claims`.
+    externally_controlled: bool,
     pub message_editor: Entity<MessageEditor>,
     pub add_context_menu_handle: PopoverMenuHandle<ContextMenu>,
     pub thinking_effort_menu_handle: PopoverMenuHandle<ContextMenu>,
@@ -1007,6 +1010,12 @@ impl ThreadView {
             }));
         }));
 
+        subscriptions.push(
+            cx.observe_global::<crate::thread_control::claims::ThreadClaims>(|this, cx| {
+                this.sync_external_control(cx)
+            }),
+        );
+
         let mut this = Self {
             root_thread_id,
             session_id,
@@ -1030,6 +1039,7 @@ impl ThreadView {
             session_capabilities,
             resumed_without_history,
             _subscriptions: subscriptions,
+            externally_controlled: false,
             permission_dropdown_handle: PopoverMenuHandle::default(),
             thread_retry_status: None,
             thread_error: None,
@@ -1513,7 +1523,49 @@ impl ThreadView {
         }
     }
 
+    /// Who is driving this thread through the control server, if anyone.
+    pub(crate) fn external_controller(&self, cx: &App) -> Option<String> {
+        crate::thread_control::claims::holder(self.root_thread_id, cx)
+    }
+
+    /// Locks the message box while another program drives the thread, and
+    /// unlocks it again afterwards.
+    fn sync_external_control(&mut self, cx: &mut Context<Self>) {
+        let controlled = self.external_controller(cx).is_some();
+        if controlled != self.externally_controlled {
+            self.externally_controlled = controlled;
+            self.message_editor
+                .update(cx, |editor, cx| editor.set_read_only(controlled, cx));
+        }
+        cx.notify();
+    }
+
+    fn render_external_control_banner(&self, cx: &mut Context<Self>) -> Option<Callout> {
+        let controller = self.external_controller(cx)?;
+        let thread_id = self.root_thread_id;
+        Some(
+            Callout::new()
+                .border_position(self.callout_border_position())
+                .icon(IconName::Blocks)
+                .severity(Severity::Info)
+                .title(format!("{controller} is driving this thread"))
+                .description(
+                    "Your message box is locked while it works, so you do not both write to the same session. You can still stop the agent.",
+                )
+                .actions_slot(
+                    Button::new("take-back-thread", "Take Back")
+                        .label_size(LabelSize::Small)
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            crate::thread_control::claims::release(thread_id, None, cx);
+                        })),
+                ),
+        )
+    }
+
     pub fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.externally_controlled {
+            return;
+        }
         let thread = &self.thread;
 
         if self.is_loading_contents {
@@ -12777,6 +12829,7 @@ impl Render for ThreadView {
             )
             .children(self.render_token_limit_callout(cx))
             .children(self.render_request_elicitations(cx))
+            .children(self.render_external_control_banner(cx))
             .child(self.render_message_editor(window, cx))
     }
 }
