@@ -8452,6 +8452,13 @@ impl Workspace {
             .on_action(cx.listener(Workspace::cancel))
     }
 
+    /// Gives the workspace a database id that already has a row, so items can be
+    /// serialized against it.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_database_id_for_test(&mut self, id: WorkspaceId) {
+        self.database_id = Some(id);
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub fn set_random_database_id(&mut self) {
         self.database_id = Some(WorkspaceId(Uuid::new_v4().as_u64_pair().0 as i64));

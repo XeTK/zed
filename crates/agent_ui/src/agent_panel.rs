@@ -12266,6 +12266,114 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn test_a_thread_tab_is_saved_restored_and_cleaned_up_with_its_workspace(
+        cx: &mut TestAppContext,
+    ) {
+        use workspace::SerializableItem as _;
+        let (panel, mut cx, thread_id) = setup_panel_with_thread(cx).await;
+        let (workspace, project) = panel.read_with(&cx, |panel, cx| {
+            let workspace = panel.workspace.upgrade().expect("workspace is alive");
+            let project = workspace.read(cx).project().clone();
+            (workspace, project)
+        });
+        let workspace_id = cx
+            .update(|_, cx| workspace::WorkspaceDb::global(cx))
+            .next_id()
+            .await
+            .expect("a workspace row can be created");
+        workspace.update(&mut cx, |workspace, _| {
+            workspace.set_database_id_for_test(workspace_id)
+        });
+
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.open_thread_in_new_tab(&OpenThreadInNewTab, window, cx);
+        });
+        cx.run_until_parked();
+        let (view, item_id) = workspace.read_with(&cx, |workspace, cx| {
+            let view = workspace
+                .active_pane()
+                .read(cx)
+                .items()
+                .find_map(|item| item.downcast::<ConversationView>())
+                .expect("the thread is a tab");
+            let item_id = view.entity_id().as_u64() as workspace::ItemId;
+            (view, item_id)
+        });
+        assert_eq!(
+            ConversationView::serialized_item_kind(),
+            "AgentConversation"
+        );
+        assert!(!view.read_with(&cx, |view, _| {
+            view.should_serialize(
+                &crate::conversation_view::AcpServerViewEvent::ActiveThreadChanged,
+            )
+        }));
+
+        // Saving records which thread the tab shows.
+        let save = workspace
+            .update_in(&mut cx, |workspace, _, cx| {
+                view.update(cx, |view, cx| view.serialize(workspace, item_id, false, cx))
+            })
+            .expect("a tab in a saved workspace is serialized");
+        save.await.unwrap();
+
+        // Restoring loads that thread again.
+        let restored = cx
+            .update(|window, cx| {
+                ConversationView::deserialize(
+                    project.clone(),
+                    workspace.downgrade(),
+                    workspace_id,
+                    item_id,
+                    window,
+                    cx,
+                )
+            })
+            .await
+            .expect("the saved tab is restored");
+        assert_eq!(
+            restored.read_with(&cx, |view, _| view.thread_id.to_key_string()),
+            thread_id
+        );
+
+        // A tab that was never saved cannot be restored, and nor can one whose thread is gone.
+        let error = cx
+            .update(|window, cx| {
+                ConversationView::deserialize(
+                    project.clone(),
+                    workspace.downgrade(),
+                    workspace_id,
+                    item_id + 1000,
+                    window,
+                    cx,
+                )
+            })
+            .await
+            .err()
+            .expect("no thread was recorded");
+        assert!(error.to_string().contains("no thread recorded"), "{error}");
+
+        // Closing the tab drops its record, while open tabs keep theirs.
+        cx.update(|window, cx| ConversationView::cleanup(workspace_id, vec![item_id], window, cx))
+            .await
+            .unwrap();
+        let db = cx.update(|_, cx| {
+            crate::conversation_view::conversation_tab_persistence::ConversationTabDb::global(cx)
+        });
+        assert_eq!(
+            db.get_thread_id(item_id, workspace_id)
+                .unwrap()
+                .map(|id| id.to_key_string()),
+            Some(thread_id.clone()),
+            "an alive tab keeps its record"
+        );
+        cx.update(|window, cx| ConversationView::cleanup(workspace_id, Vec::new(), window, cx))
+            .await
+            .unwrap();
+        assert_eq!(db.get_thread_id(item_id, workspace_id).unwrap(), None);
+    }
+
+    #[gpui::test]
     async fn test_claiming_a_thread_locks_the_message_box_until_released(cx: &mut TestAppContext) {
         use settings::{ThreadControlMode, ThreadControlPermission};
         let (panel, mut cx, thread_id) = setup_panel_with_thread(cx).await;
