@@ -154,6 +154,19 @@
       "pr": 11
     },
     {
+      "section": "agent",
+      "title": "Let Claude and other AI tools read your threads (experimental)",
+      "summary": "Off by default, read-only.",
+      "details": [
+        "Set `agent.thread_control` to `read_only`. Zed then listens on a local socket that only your user can use, and writes the token to `control.json` in its data directory.",
+        "Point an MCP client at the bundled command, for example `claude mcp add zed-threads -- \"/Applications/Zed xetk Nightly.app/Contents/MacOS/cli\" --mcp`. It offers **list_projects**, **list_threads** and **get_thread**. Nothing can send messages, start agents or approve tool calls."
+      ],
+      "example": "{ \"agent\": { \"thread_control\": \"read_only\" } }",
+      "settings": [
+        "thread_control"
+      ]
+    },
+    {
       "section": "stability",
       "title": "Child processes are cleaned up",
       "details": [

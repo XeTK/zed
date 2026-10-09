@@ -8,6 +8,7 @@
 )]
 
 mod completions;
+mod mcp;
 
 use crate::completions::Shell;
 
@@ -103,6 +104,10 @@ struct Args {
     /// Print Zed's version and the app path.
     #[arg(short, long)]
     version: bool,
+    /// Run an MCP server on stdin and stdout that lets an AI client read the
+    /// agent threads in the running Zed. Turn on `agent.thread_control` in Zed first.
+    #[arg(long)]
+    mcp: bool,
     /// Run zed in the foreground (useful for debugging)
     #[arg(long)]
     foreground: bool,
@@ -522,6 +527,10 @@ fn run() -> Result<()> {
     let user_data_dir = args.user_data_dir.clone();
     if let Some(dir) = &user_data_dir {
         paths::set_custom_data_dir(dir);
+    }
+
+    if args.mcp {
+        return mcp::run();
     }
 
     #[cfg(target_os = "linux")]
