@@ -76,7 +76,7 @@ fn handle_line(line: &str, call: &dyn Fn(&str, Value) -> Result<Value>) -> Optio
             }),
         ),
         "ping" => ok_reply(id, json!({})),
-        "tools/list" => ok_reply(id, json!({ "tools": tools() })),
+        "tools/list" => ok_reply(id, json!({ "tools": offered_tools(call) })),
         "tools/call" => {
             let name = params
                 .get("name")
@@ -86,7 +86,7 @@ fn handle_line(line: &str, call: &dyn Fn(&str, Value) -> Result<Value>) -> Optio
                 .get("arguments")
                 .cloned()
                 .unwrap_or_else(|| json!({}));
-            if !tools().iter().any(|tool| tool["name"] == name) {
+            if !all_tools().iter().any(|tool| tool["name"] == name) {
                 return Some(error_reply(id, -32602, &format!("unknown tool {name:?}")));
             }
             ok_reply(
@@ -114,8 +114,29 @@ fn error_reply(id: Value, code: i64, message: &str) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
 }
 
-fn tools() -> Vec<Value> {
+/// The read tools, plus each write tool Zed's settings do not deny. If Zed
+/// cannot be reached, only the read tools are offered.
+fn offered_tools(call: &dyn Fn(&str, Value) -> Result<Value>) -> Vec<Value> {
+    let permissions = call("get_permissions", json!({}))
+        .ok()
+        .filter(|permissions| permissions["mode"] == "read_write");
+    all_tools()
+        .into_iter()
+        .filter(|tool| {
+            let name = tool["name"].as_str().unwrap_or_default();
+            tool["annotations"]["readOnlyHint"] == true
+                || permissions.as_ref().is_some_and(|permissions| {
+                    permissions["permissions"][name]
+                        .as_str()
+                        .is_some_and(|permission| permission != "deny")
+                })
+        })
+        .collect()
+}
+
+fn all_tools() -> Vec<Value> {
     let read_only = json!({ "readOnlyHint": true });
+    let changes_a_thread = json!({ "readOnlyHint": false, "destructiveHint": false });
     vec![
         json!({
             "name": "list_projects",
@@ -149,6 +170,69 @@ fn tools() -> Vec<Value> {
                 "required": ["id"],
             },
             "annotations": read_only,
+        }),
+        json!({
+            "name": "send_message",
+            "description": "Send a message to an existing Zed agent thread. This makes the thread's agent run and act on it, so Zed may ask the user to approve each message. The thread must be idle.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "A thread id from list_threads." },
+                    "text": { "type": "string", "description": "The message to send." },
+                },
+                "required": ["id", "text"],
+            },
+            "annotations": changes_a_thread,
+        }),
+        json!({
+            "name": "create_thread",
+            "description": "Start a new Zed agent thread in a project that is open in Zed, with a first message. The agent starts working on it, so Zed may ask the user to approve it.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": { "type": "string", "description": "A folder that is open in Zed, as listed by list_projects." },
+                    "text": { "type": "string", "description": "The first message." },
+                    "agent": { "type": "string", "description": "The agent to use. The Zed agent when left out." },
+                },
+                "required": ["project", "text"],
+            },
+            "annotations": changes_a_thread,
+        }),
+        json!({
+            "name": "cancel_turn",
+            "description": "Stop the agent that is running in a Zed thread.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "id": { "type": "string", "description": "A thread id from list_threads." } },
+                "required": ["id"],
+            },
+            "annotations": changes_a_thread,
+        }),
+        json!({
+            "name": "archive_thread",
+            "description": "Archive a Zed thread, or restore it with archived set to false.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "A thread id from list_threads." },
+                    "archived": { "type": "boolean", "description": "false to restore. Default true." },
+                },
+                "required": ["id"],
+            },
+            "annotations": changes_a_thread,
+        }),
+        json!({
+            "name": "rename_thread",
+            "description": "Change a Zed thread's title.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "A thread id from list_threads." },
+                    "title": { "type": "string", "description": "The new one-line title." },
+                },
+                "required": ["id", "title"],
+            },
+            "annotations": changes_a_thread,
         }),
     ]
 }
@@ -250,23 +334,74 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_tools_are_read_only_and_have_schemas() {
-        let response = reply(
-            r#"{"jsonrpc":"2.0","id":"a","method":"tools/list"}"#,
-            &unused,
-        );
-        let tools = response["result"]["tools"].as_array().unwrap();
-        let names: Vec<_> = tools
+    fn tool_names(permissions: Result<Value>) -> Vec<String> {
+        let call = move |method: &str, _: Value| -> Result<Value> {
+            assert_eq!(method, "get_permissions");
+            match &permissions {
+                Ok(value) => Ok(value.clone()),
+                Err(error) => bail!("{error}"),
+            }
+        };
+        let response = reply(r#"{"jsonrpc":"2.0","id":"a","method":"tools/list"}"#, &call);
+        response["result"]["tools"]
+            .as_array()
+            .unwrap()
             .iter()
-            .map(|tool| tool["name"].as_str().unwrap())
-            .collect();
-        assert_eq!(names, ["list_projects", "list_threads", "get_thread"]);
-        for tool in tools {
-            assert_eq!(tool["annotations"]["readOnlyHint"], true);
-            assert_eq!(tool["inputSchema"]["type"], "object");
+            .map(|tool| tool["name"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    const READ_TOOLS: [&str; 3] = ["list_projects", "list_threads", "get_thread"];
+
+    #[test]
+    fn test_only_read_tools_are_offered_unless_zed_allows_changes() {
+        let denied = json!({ "mode": "read_only", "permissions": {
+            "send_message": "deny", "create_thread": "deny", "cancel_turn": "deny",
+            "archive_thread": "deny", "rename_thread": "deny" } });
+        assert_eq!(tool_names(Ok(denied)), READ_TOOLS);
+        // Zed not reachable: stay safe.
+        assert_eq!(tool_names(Err(anyhow::anyhow!("no zed"))), READ_TOOLS);
+        // The mode decides, whatever the individual permissions say.
+        let read_only = json!({ "mode": "read_only", "permissions": { "send_message": "allow" } });
+        assert_eq!(tool_names(Ok(read_only)), READ_TOOLS);
+    }
+
+    #[test]
+    fn test_write_tools_are_offered_one_by_one_as_permitted() {
+        let permissions = json!({ "mode": "read_write", "permissions": {
+            "send_message": "ask", "create_thread": "deny", "cancel_turn": "allow",
+            "archive_thread": "deny", "rename_thread": "deny" } });
+        assert_eq!(
+            tool_names(Ok(permissions)),
+            [
+                "list_projects",
+                "list_threads",
+                "get_thread",
+                "send_message",
+                "cancel_turn"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_tools_have_schemas_and_say_whether_they_change_anything() {
+        let all = all_tools();
+        assert_eq!(all.len(), 8);
+        for tool in &all {
+            assert_eq!(tool["inputSchema"]["type"], "object", "{}", tool["name"]);
+            let reads = READ_TOOLS.contains(&tool["name"].as_str().unwrap());
+            assert_eq!(
+                tool["annotations"]["readOnlyHint"], reads,
+                "{}",
+                tool["name"]
+            );
         }
-        assert_eq!(tools[2]["inputSchema"]["required"], json!(["id"]));
+        let required = |name: &str| {
+            all.iter().find(|tool| tool["name"] == name).unwrap()["inputSchema"]["required"].clone()
+        };
+        assert_eq!(required("get_thread"), json!(["id"]));
+        assert_eq!(required("send_message"), json!(["id", "text"]));
+        assert_eq!(required("create_thread"), json!(["project", "text"]));
     }
 
     #[test]
