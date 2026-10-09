@@ -176,6 +176,7 @@ impl fmt::Display for AutoCompactThreshold {
 /// What other programs may do to threads under `thread_control: read_write`.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ThreadControlPermissions {
+    pub claim_thread: ThreadControlPermission,
     pub send_message: ThreadControlPermission,
     pub create_thread: ThreadControlPermission,
     pub cancel_turn: ThreadControlPermission,
@@ -855,6 +856,7 @@ impl Settings for AgentSettings {
             thread_control_permissions: {
                 let permissions = agent.thread_control_permissions.unwrap_or_default();
                 ThreadControlPermissions {
+                    claim_thread: permissions.claim_thread.unwrap_or_default(),
                     send_message: permissions.send_message.unwrap_or_default(),
                     create_thread: permissions.create_thread.unwrap_or_default(),
                     cancel_turn: permissions.cancel_turn.unwrap_or_default(),

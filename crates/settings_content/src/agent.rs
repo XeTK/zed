@@ -156,6 +156,12 @@ pub enum ThreadControlPermission {
 #[with_fallible_options]
 #[derive(Clone, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, Default)]
 pub struct ThreadControlPermissionsContent {
+    /// Take over a thread: the other program becomes the one sending it messages,
+    /// and the thread's own message box is locked until it hands the thread back
+    /// or you take it back. Sending a message does not need this.
+    ///
+    /// Default: ask
+    pub claim_thread: Option<ThreadControlPermission>,
     /// Send a message to a thread, which makes its agent run.
     ///
     /// Default: ask

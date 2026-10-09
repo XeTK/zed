@@ -1395,6 +1395,10 @@
     // With "read_write", what other programs may do to threads. Each is
     // "deny" (refused and not offered), "ask" (Zed prompts you every time) or "allow".
     "thread_control_permissions": {
+      // Take over a thread: the other program becomes the one sending it messages,
+      // and the thread's own message box is locked until it hands the thread back or
+      // you take it back. Sending a message does not need this.
+      "claim_thread": "ask",
       // Send a message to a thread, which makes its agent run.
       "send_message": "ask",
       // Start a new thread with a first message, which makes its agent run.
