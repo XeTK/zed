@@ -440,7 +440,11 @@ async fn get_thread(params: Value, cx: &mut AsyncApp) -> Result<Value> {
 
     enum Source {
         Live(Entity<AcpThread>),
+        /// A thread of Zed's own agent, saved in the threads database.
         Saved(acp::SessionId),
+        /// A thread of an external agent, whose history the agent keeps and
+        /// replays when the thread is loaded.
+        External(ThreadMetadata),
     }
 
     let (metadata, source) = cx.update(|cx| -> Result<_> {
@@ -464,7 +468,11 @@ async fn get_thread(params: Value, cx: &mut AsyncApp) -> Result<Value> {
             .session_id
             .clone()
             .context("this thread is a draft and has no messages")?;
-        Ok((metadata, Source::Saved(session_id)))
+        if metadata.agent_id.as_ref() == agent::ZED_AGENT_ID.as_ref() {
+            Ok((metadata, Source::Saved(session_id)))
+        } else {
+            Ok((metadata.clone(), Source::External(metadata)))
+        }
     })?;
 
     let (status, entries): (&str, Vec<Value>) = match source {
@@ -478,6 +486,19 @@ async fn get_thread(params: Value, cx: &mut AsyncApp) -> Result<Value> {
                 .collect();
             (thread_status(thread), entries)
         }),
+        Source::External(metadata) => {
+            let thread = load_external_thread(&metadata, cx).await?;
+            cx.update(|cx| {
+                let thread = thread.read(cx);
+                let entries = thread
+                    .entries()
+                    .iter()
+                    .enumerate()
+                    .map(|(index, entry)| entry_json(index, entry, cx))
+                    .collect();
+                ("idle", entries)
+            })
+        }
         Source::Saved(session_id) => {
             let load = cx.update(|cx| {
                 ThreadStore::global(cx).update(cx, |store, cx| store.load_thread(session_id, cx))
@@ -515,6 +536,53 @@ async fn get_thread(params: Value, cx: &mut AsyncApp) -> Result<Value> {
         "offset": params.offset,
         "entries": entries,
     }))
+}
+
+/// Replays an external agent's thread in the background, without opening it in
+/// any panel. The agent already has to be running for one of the panels.
+async fn load_external_thread(
+    metadata: &ThreadMetadata,
+    cx: &mut AsyncApp,
+) -> Result<Entity<AcpThread>> {
+    let session_id = metadata
+        .session_id
+        .clone()
+        .context("this thread has no session")?;
+    let agent = crate::Agent::from(metadata.agent_id.clone());
+
+    let (connection_task, project) = cx
+        .update(|cx| -> Result<_> {
+            for workspace in workspaces(cx) {
+                if workspace.read(cx).project().read(cx).remote_connection_options(cx)
+                    != metadata.remote_connection
+                {
+                    continue;
+                }
+                let Some(panel) = workspace.read(cx).panel::<AgentPanel>(cx) else {
+                    continue;
+                };
+                let store = panel.read(cx).agent_connection_store().clone();
+                let Some(entry) = store.read(cx).entry(&agent) else {
+                    continue;
+                };
+                let project = workspace.read(cx).project().clone();
+                return Ok((entry.read(cx).wait_for_connection(), project));
+            }
+            Err(anyhow!(
+                "{} is not running in Zed, so this thread's history is not available. Open the thread in Zed once to start it.",
+                metadata.agent_id
+            ))
+        })?;
+
+    let connection = connection_task
+        .await
+        .map_err(|error| anyhow!("{} could not start: {error}", metadata.agent_id))?
+        .connection;
+    let work_dirs = metadata.folder_paths().clone();
+    let title = Some(metadata.display_title());
+    let load = cx.update(|cx| connection.load_session(session_id, project, work_dirs, title, cx));
+    load.await
+        .with_context(|| format!("{} could not load this thread", metadata.agent_id))
 }
 
 fn entry_json(index: usize, entry: &acp_thread::AgentThreadEntry, cx: &App) -> Value {

@@ -3541,6 +3541,10 @@ impl AgentPanel {
         })
     }
 
+    pub(crate) fn agent_connection_store(&self) -> &Entity<AgentConnectionStore> {
+        &self.connection_store
+    }
+
     /// Starts a new thread whose first message is sent straight away. Returns
     /// the id the thread will have.
     pub(crate) fn start_thread_with_content(
@@ -11637,6 +11641,93 @@ mod tests {
             !is_archived(&thread_id, &mut cx),
             "archived: false restores it"
         );
+    }
+
+    #[gpui::test]
+    async fn test_thread_control_reads_an_external_agents_thread_without_opening_it(
+        cx: &mut TestAppContext,
+    ) {
+        use settings::{ThreadControlMode, ThreadControlPermission};
+        let (panel, mut cx) = setup_visible_panel(cx).await;
+        cx.run_until_parked();
+        panel.update(&mut cx, |panel, cx| {
+            panel.connection_store.update(cx, |store, cx| {
+                store.restart_connection(
+                    Agent::Stub,
+                    Rc::new(StubAgentServer::new(SessionTrackingConnection::new())),
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+        set_thread_control(
+            ThreadControlMode::ReadOnly,
+            ThreadControlPermission::Ask,
+            &[],
+            &mut cx,
+        );
+
+        // A saved thread of an external agent, not open in any panel.
+        let thread_id = crate::thread_metadata_store::ThreadId::new();
+        cx.update(|_, cx| {
+            ThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                store.save(
+                    crate::thread_metadata_store::ThreadMetadata {
+                        thread_id,
+                        session_id: Some(acp::SessionId::new("external-session")),
+                        agent_id: project::AgentId::new("stub"),
+                        title: Some("External thread".into()),
+                        title_override: None,
+                        updated_at: chrono::Utc::now(),
+                        created_at: Some(chrono::Utc::now()),
+                        interacted_at: None,
+                        worktree_paths: WorktreePaths::from_folder_paths(&PathList::new(&[
+                            Path::new("/project"),
+                        ])),
+                        remote_connection: None,
+                        archived: false,
+                    },
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+        let active_before = panel.read_with(&cx, |panel, _| {
+            panel
+                .active_conversation_view()
+                .map(|view| view.entity_id())
+        });
+
+        let thread = control_call(
+            "get_thread",
+            json!({ "id": thread_id.to_key_string() }),
+            &mut cx,
+        )
+        .await
+        .expect("an external agent's thread can be read");
+        assert_eq!(thread["title"], "External thread");
+        assert_eq!(thread["agent"], "stub");
+        assert!(thread["entries"].is_array());
+
+        let active_after = panel.read_with(&cx, |panel, _| {
+            panel
+                .active_conversation_view()
+                .map(|view| view.entity_id())
+        });
+        assert_eq!(
+            active_before, active_after,
+            "reading must not change what the panel shows"
+        );
+        let listed = control_call("list_threads", json!({}), &mut cx)
+            .await
+            .unwrap();
+        let entry = listed["threads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|thread| thread["id"] == thread_id.to_key_string().as_str())
+            .expect("the thread is listed");
+        assert_eq!(entry["open"], false, "it was read, not opened");
     }
 
     #[gpui::test]
