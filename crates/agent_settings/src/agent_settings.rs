@@ -19,7 +19,7 @@ use settings::{
     DockPosition, DockSide, IntoGpui, LanguageModelParameters, LanguageModelSelection,
     MessageTimestamps, NotifyWhenAgentWaiting, PlaySoundWhenAgentDone, RegisterSetting, Settings,
     SettingsContent, SettingsStore, SidebarDockPosition, SidebarSide, ThinkingBlockDisplay,
-    ThreadControlMode, ToolPermissionMode, update_settings_file,
+    ThreadControlMode, ThreadControlPermission, ToolPermissionMode, update_settings_file,
     update_settings_file_with_completion,
 };
 use util::ResultExt as _;
@@ -173,6 +173,16 @@ impl fmt::Display for AutoCompactThreshold {
     }
 }
 
+/// What other programs may do to threads under `thread_control: read_write`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ThreadControlPermissions {
+    pub send_message: ThreadControlPermission,
+    pub create_thread: ThreadControlPermission,
+    pub cancel_turn: ThreadControlPermission,
+    pub archive_thread: ThreadControlPermission,
+    pub rename_thread: ThreadControlPermission,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AutoCompactSettings {
     pub enabled: bool,
@@ -250,6 +260,8 @@ pub struct AgentSettings {
     pub thinking_display: ThinkingBlockDisplay,
     pub message_timestamps: MessageTimestamps,
     pub thread_control: ThreadControlMode,
+    pub thread_control_permissions: ThreadControlPermissions,
+    pub thread_control_projects: Vec<String>,
     pub cancel_generation_on_terminal_stop: bool,
     pub use_modifier_to_send: bool,
     pub message_editor_min_lines: usize,
@@ -840,6 +852,17 @@ impl Settings for AgentSettings {
             thinking_display: agent.thinking_display.unwrap(),
             message_timestamps: agent.message_timestamps.unwrap(),
             thread_control: agent.thread_control.unwrap(),
+            thread_control_permissions: {
+                let permissions = agent.thread_control_permissions.unwrap_or_default();
+                ThreadControlPermissions {
+                    send_message: permissions.send_message.unwrap_or_default(),
+                    create_thread: permissions.create_thread.unwrap_or_default(),
+                    cancel_turn: permissions.cancel_turn.unwrap_or_default(),
+                    archive_thread: permissions.archive_thread.unwrap_or_default(),
+                    rename_thread: permissions.rename_thread.unwrap_or_default(),
+                }
+            },
+            thread_control_projects: agent.thread_control_projects.unwrap_or_default(),
             cancel_generation_on_terminal_stop: agent.cancel_generation_on_terminal_stop.unwrap(),
             use_modifier_to_send: agent.use_modifier_to_send.unwrap(),
             message_editor_min_lines: agent.message_editor_min_lines.unwrap(),

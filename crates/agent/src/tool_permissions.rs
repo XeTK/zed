@@ -617,6 +617,8 @@ mod tests {
             thinking_display: Default::default(),
             message_timestamps: Default::default(),
             thread_control: Default::default(),
+            thread_control_permissions: Default::default(),
+            thread_control_projects: Default::default(),
         }
     }
 

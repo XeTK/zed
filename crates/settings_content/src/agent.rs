@@ -121,6 +121,61 @@ pub enum ThreadControlMode {
     Off,
     /// Other programs on this machine can list and read threads, but not change them.
     ReadOnly,
+    /// As `read_only`, and they can also do the things `thread_control_permissions` allows.
+    ReadWrite,
+}
+
+/// What happens when another program asks to do something to a thread.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+    MergeFrom,
+    strum::VariantArray,
+    strum::VariantNames,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadControlPermission {
+    /// Refuse, and do not offer the tool to the other program.
+    Deny,
+    /// Show a prompt in Zed for every request, and only go ahead if you allow it.
+    #[default]
+    Ask,
+    /// Go ahead without asking.
+    Allow,
+}
+
+/// Which things another program may do to threads when `thread_control` is
+/// `read_write`. Each is `deny`, `ask` or `allow`.
+#[with_fallible_options]
+#[derive(Clone, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, Default)]
+pub struct ThreadControlPermissionsContent {
+    /// Send a message to a thread, which makes its agent run.
+    ///
+    /// Default: ask
+    pub send_message: Option<ThreadControlPermission>,
+    /// Start a new thread with a first message, which makes its agent run.
+    ///
+    /// Default: ask
+    pub create_thread: Option<ThreadControlPermission>,
+    /// Stop the agent that is running in a thread.
+    ///
+    /// Default: ask
+    pub cancel_turn: Option<ThreadControlPermission>,
+    /// Archive or restore a thread.
+    ///
+    /// Default: ask
+    pub archive_thread: Option<ThreadControlPermission>,
+    /// Change a thread's title.
+    ///
+    /// Default: ask
+    pub rename_thread: Option<ThreadControlPermission>,
 }
 
 /// Threshold at which agent auto-compaction runs. See
@@ -423,6 +478,15 @@ pub struct AgentSettingsContent {
     ///
     /// Default: off
     pub thread_control: Option<ThreadControlMode>,
+    /// What other programs may do to threads when `thread_control` is `read_write`.
+    /// Each entry is `deny`, `ask` (prompt you in Zed each time) or `allow`.
+    pub thread_control_permissions: Option<ThreadControlPermissionsContent>,
+    /// Folders that `thread_control` is limited to. Only threads in these folders can be
+    /// listed, read or changed, and new threads can only be started in them. Empty means
+    /// every project.
+    ///
+    /// Default: []
+    pub thread_control_projects: Option<Vec<String>>,
     /// Whether clicking the stop button on a running terminal tool should also cancel the agent's generation.
     /// Note that this only applies to the stop button, not to ctrl+c inside the terminal.
     ///

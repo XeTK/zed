@@ -1387,10 +1387,28 @@
     // `zed --mcp`, may use the agent threads in this Zed. May be one of:
     //  - "off": nothing is listening
     //  - "read_only": other programs can list and read threads, but not change them
+    //  - "read_write": as read_only, plus whatever `thread_control_permissions` allows
     // They need the token Zed writes to `control.json` in its data directory.
     //
     // Default: off
     "thread_control": "off",
+    // With "read_write", what other programs may do to threads. Each is
+    // "deny" (refused and not offered), "ask" (Zed prompts you every time) or "allow".
+    "thread_control_permissions": {
+      // Send a message to a thread, which makes its agent run.
+      "send_message": "ask",
+      // Start a new thread with a first message, which makes its agent run.
+      "create_thread": "ask",
+      // Stop the agent that is running in a thread.
+      "cancel_turn": "ask",
+      // Archive or restore a thread.
+      "archive_thread": "ask",
+      // Change a thread's title.
+      "rename_thread": "ask"
+    },
+    // Limit thread control to these folders. Only threads in them can be listed, read or
+    // changed, and new threads can only be started in them. Empty means every project.
+    "thread_control_projects": [],
     // Whether clicking the stop button on a running terminal tool should also cancel the agent's generation.
     // Note that this only applies to the stop button, not to ctrl+c inside the terminal.
     //
