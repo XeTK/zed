@@ -616,6 +616,7 @@ mod tests {
             threads_sidebar_archive_after_days: 0,
             thinking_display: Default::default(),
             message_timestamps: Default::default(),
+            thread_control: Default::default(),
         }
     }
 

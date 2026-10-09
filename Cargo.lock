@@ -512,6 +512,7 @@ dependencies = [
  "markdown",
  "menu",
  "multi_buffer",
+ "net",
  "notifications",
  "ordered-float 5.5.0",
  "parking_lot",

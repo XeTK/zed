@@ -29,6 +29,7 @@ mod terminal_inline_assistant;
 pub mod terminal_thread_metadata_store;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
+mod thread_control;
 mod thread_import;
 pub mod thread_metadata_store;
 pub mod thread_worktree_archive;
@@ -622,6 +623,7 @@ pub fn init(
     workspace::register_serializable_item::<ConversationView>(cx);
     context_server_configuration::init(language_registry, fs.clone(), cx);
     thread_metadata_store::init(cx);
+    thread_control::init(cx);
     terminal_thread_metadata_store::init(cx);
 
     inline_assistant::init(fs.clone(), prompt_builder.clone(), cx);
@@ -1024,6 +1026,7 @@ mod tests {
             threads_sidebar_archive_after_days: 0,
             thinking_display: Default::default(),
             message_timestamps: Default::default(),
+            thread_control: Default::default(),
         };
 
         cx.update(|cx| {

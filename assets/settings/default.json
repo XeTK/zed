@@ -1383,6 +1383,14 @@
     //
     // Default: on_hover
     "message_timestamps": "on_hover",
+    // Whether other programs on this machine, such as an MCP bridge started with
+    // `zed --mcp`, may use the agent threads in this Zed. May be one of:
+    //  - "off": nothing is listening
+    //  - "read_only": other programs can list and read threads, but not change them
+    // They need the token Zed writes to `control.json` in its data directory.
+    //
+    // Default: off
+    "thread_control": "off",
     // Whether clicking the stop button on a running terminal tool should also cancel the agent's generation.
     // Note that this only applies to the stop button, not to ctrl+c inside the terminal.
     //
