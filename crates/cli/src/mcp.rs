@@ -197,8 +197,21 @@ fn all_tools() -> Vec<Value> {
             "annotations": read_only,
         }),
         json!({
+            "name": "get_handoff",
+            "description": "Where a Zed agent thread stands, so you can carry on its work yourself: its goal (the first message), the latest messages, recent tool calls, files touched, and anything waiting for the person. Does not take control; use claim_thread for that.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "A thread id from list_threads." },
+                    "recent": { "type": "integer", "description": "How many of the latest messages to include. Default 6, at most 20." },
+                },
+                "required": ["id"],
+            },
+            "annotations": read_only,
+        }),
+        json!({
             "name": "claim_thread",
-            "description": "Take over a Zed agent thread, so you are the one sending it messages. Zed asks the person first, shows that you are driving it, and locks the thread's own message box so you do not both write to the same session. Each message you send keeps the claim alive for 10 minutes. Call release_thread when you are done.",
+            "description": "Take over a Zed agent thread. Zed asks the person first, shows that you are driving it, and locks the thread's own message box so you do not both write to the same session. The result includes where the thread stands (as get_handoff does), so you can carry on the work yourself, or you can drive its agent with send_message. Each message you send keeps the claim alive for 10 minutes. Call release_thread when you are done.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -211,10 +224,13 @@ fn all_tools() -> Vec<Value> {
         }),
         json!({
             "name": "release_thread",
-            "description": "Hand a thread you claimed back to the person, unlocking Zed's message box.",
+            "description": "Hand a thread you claimed back to the person, unlocking Zed's message box. Give a note saying what you did and what is left: it is put in the thread's message box, unsent, for the person to read and send so the thread's own agent hears about it.",
             "inputSchema": {
                 "type": "object",
-                "properties": { "id": { "type": "string", "description": "A thread id from list_threads." } },
+                "properties": {
+                    "id": { "type": "string", "description": "A thread id from list_threads." },
+                    "note": { "type": "string", "description": "What you did and what is left. Optional, at most 5000 characters." },
+                },
                 "required": ["id"],
             },
             "annotations": changes_a_thread,
@@ -406,7 +422,7 @@ mod tests {
             .collect()
     }
 
-    const READ_TOOLS: [&str; 3] = ["list_projects", "list_threads", "get_thread"];
+    const READ_TOOLS: [&str; 4] = ["list_projects", "list_threads", "get_thread", "get_handoff"];
 
     #[test]
     fn test_only_read_tools_are_offered_unless_zed_allows_changes() {
@@ -432,6 +448,7 @@ mod tests {
                 "list_projects",
                 "list_threads",
                 "get_thread",
+                "get_handoff",
                 "send_message",
                 "cancel_turn"
             ]
@@ -449,6 +466,7 @@ mod tests {
                 "list_projects",
                 "list_threads",
                 "get_thread",
+                "get_handoff",
                 "claim_thread",
                 "release_thread"
             ]
@@ -486,7 +504,7 @@ mod tests {
     #[test]
     fn test_tools_have_schemas_and_say_whether_they_change_anything() {
         let all = all_tools();
-        assert_eq!(all.len(), 10);
+        assert_eq!(all.len(), 11);
         for tool in &all {
             assert_eq!(tool["inputSchema"]["type"], "object", "{}", tool["name"]);
             let reads = READ_TOOLS.contains(&tool["name"].as_str().unwrap());
@@ -501,6 +519,7 @@ mod tests {
         };
         assert_eq!(required("get_thread"), json!(["id"]));
         assert_eq!(required("send_message"), json!(["id", "text"]));
+        assert_eq!(required("get_handoff"), json!(["id"]));
         assert_eq!(required("claim_thread"), json!(["id"]));
         assert_eq!(required("release_thread"), json!(["id"]));
         assert_eq!(required("create_thread"), json!(["project", "text"]));
