@@ -73,8 +73,15 @@ use workspace::{
 
 use git_ui_core::worktree_service::{RemoteBranchName, worktree_create_targets};
 
+// Short in tests, so the loop can be exercised without moving the clock by an hour.
+#[cfg(not(test))]
 const ARCHIVE_STALE_THREADS_FIRST_DELAY: std::time::Duration = std::time::Duration::from_secs(60);
+#[cfg(not(test))]
 const ARCHIVE_STALE_THREADS_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+#[cfg(test)]
+const ARCHIVE_STALE_THREADS_FIRST_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
+#[cfg(test)]
+const ARCHIVE_STALE_THREADS_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 use zed_actions::editor::{MoveDown, MoveUp};
 use zed_actions::{CreateWorktree, NewWorktreeBranchTarget, OpenRecent};
 
@@ -84,6 +91,20 @@ use crate::thread_switcher::{
     ThreadSwitcher, ThreadSwitcherEntry, ThreadSwitcherEvent, ThreadSwitcherSelection,
     ThreadSwitcherTerminalEntry, ThreadSwitcherThreadEntry,
 };
+
+/// The icon beside a project's name, and what it says on hover, for the kind of
+/// project it is.
+fn project_type_icon(host: Option<&RemoteConnectionOptions>) -> (IconName, &'static str) {
+    match host {
+        None => (IconName::Screen, "Local project"),
+        Some(RemoteConnectionOptions::Wsl(_)) => (IconName::Linux, "Remote project (WSL)"),
+        Some(RemoteConnectionOptions::Docker(_)) => (IconName::Box, "Remote project (container)"),
+        Some(RemoteConnectionOptions::LocalProcess(_)) => {
+            (IconName::Blocks, "Local project in its own process")
+        }
+        Some(_) => (IconName::Server, "Remote project (SSH)"),
+    }
+}
 
 #[cfg(test)]
 mod sidebar_tests;
@@ -2441,23 +2462,12 @@ impl Sidebar {
         }
     }
 
-    /// The small icon beside a project's name showing what kind of project it is.
     fn render_project_type_icon(
         &self,
         ix: usize,
         host: Option<&RemoteConnectionOptions>,
     ) -> AnyElement {
-        let (icon, tooltip) = match host {
-            None => (IconName::Screen, "Local project"),
-            Some(RemoteConnectionOptions::Wsl(_)) => (IconName::Linux, "Remote project (WSL)"),
-            Some(RemoteConnectionOptions::Docker(_)) => {
-                (IconName::Box, "Remote project (container)")
-            }
-            Some(RemoteConnectionOptions::LocalProcess(_)) => {
-                (IconName::Blocks, "Local project in its own process")
-            }
-            Some(_) => (IconName::Server, "Remote project (SSH)"),
-        };
+        let (icon, tooltip) = project_type_icon(host);
 
         div()
             .id(format!("project-type-icon-{}", ix))

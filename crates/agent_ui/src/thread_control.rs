@@ -885,6 +885,61 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn test_asking_with_no_zed_window_refuses_and_deny_never_asks(cx: &mut TestAppContext) {
+        use gpui::UpdateGlobal as _;
+        use policy::{Capability, authorize, ensure_not_denied};
+        use settings::ThreadControlPermission;
+        init_test(cx);
+        let set = |permission: ThreadControlPermission, cx: &mut TestAppContext| {
+            cx.update(|cx| {
+                settings::SettingsStore::update_global(cx, |store, cx| {
+                    store.update_user_settings(cx, |content| {
+                        let agent = content.agent.get_or_insert_default();
+                        agent.thread_control = Some(ThreadControlMode::ReadWrite);
+                        agent.thread_control_permissions =
+                            Some(settings::ThreadControlPermissionsContent {
+                                archive_thread: Some(permission),
+                                ..Default::default()
+                            });
+                    });
+                });
+            });
+        };
+        let run = |cx: &mut TestAppContext| {
+            let task = cx.spawn(async move |cx| {
+                let outcome = authorize(
+                    Capability::ArchiveThread,
+                    "archive it".into(),
+                    &mut cx.clone(),
+                )
+                .await;
+                let not_denied =
+                    ensure_not_denied(Capability::ArchiveThread, &mut cx.clone()).await;
+                (outcome, not_denied)
+            });
+            task
+        };
+
+        set(ThreadControlPermission::Ask, cx);
+        let (outcome, not_denied) = run(cx).await;
+        let error = outcome.unwrap_err();
+        assert!(
+            error.to_string().contains("no Zed window to ask in"),
+            "{error}"
+        );
+        assert!(not_denied.is_ok(), "ask is not deny");
+
+        set(ThreadControlPermission::Deny, cx);
+        let (outcome, not_denied) = run(cx).await;
+        assert!(outcome.unwrap_err().to_string().contains("not allowed"));
+        assert!(not_denied.unwrap_err().to_string().contains("not allowed"));
+
+        set(ThreadControlPermission::Allow, cx);
+        let (outcome, not_denied) = run(cx).await;
+        assert!(outcome.is_ok() && not_denied.is_ok());
+    }
+
+    #[gpui::test]
     async fn test_the_server_follows_the_setting(cx: &mut TestAppContext) {
         init_test(cx);
         let directory = tempfile::tempdir().unwrap();

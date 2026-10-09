@@ -334,5 +334,8 @@ mod tests {
         )
         .describe();
         assert_eq!(read_only["permissions"]["send_message"], "deny");
+        let off = policy(ThreadControlMode::Off, ThreadControlPermission::Allow, &[]).describe();
+        assert_eq!(off["mode"], "off");
+        assert_eq!(off["permissions"]["claim_thread"], "deny");
     }
 }

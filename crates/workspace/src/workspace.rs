@@ -98,8 +98,8 @@ pub use persistence::{
 use persistence::{SerializedWindowBounds, model::SerializedWorkspace};
 use postage::stream::Stream;
 use project::{
-    DirectoryLister, Project, ProjectEntryId, ProjectPath, ResolvedPath, Worktree, WorktreeId,
-    WindowAccentColorSettings, WorktreeSettings,
+    DirectoryLister, Project, ProjectEntryId, ProjectPath, ResolvedPath, WindowAccentColorSettings,
+    Worktree, WorktreeId, WorktreeSettings,
     debugger::{breakpoint_store::BreakpointStoreEvent, session::ThreadStatus},
     git_store::{GitStoreEvent, RepositoryEvent},
     project_settings::ProjectSettings,

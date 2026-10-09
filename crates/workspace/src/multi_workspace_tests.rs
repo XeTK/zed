@@ -1849,4 +1849,15 @@ async fn test_reorder_project_group_before_moves_group_between_others(cx: &mut T
         !already_adjacent,
         "a group already directly before the target should be a no-op"
     );
+
+    let unknown = ProjectGroupKey::new(None, PathList::new(&[PathBuf::from("/never-added")]));
+    for (source, target) in [(&unknown, &key_a), (&key_a, &unknown)] {
+        let moved = multi_workspace.update(cx, |multi_workspace, cx| {
+            multi_workspace.reorder_project_group_before(source, target, cx)
+        });
+        assert!(
+            !moved,
+            "a group that does not exist cannot be moved or moved to"
+        );
+    }
 }
