@@ -445,18 +445,72 @@ pub async fn claim_thread(raw: Value, cx: &mut AsyncApp) -> Result<Value> {
     // Open it first, so the lock and the banner show where you are looking.
     open_thread_view(&metadata, cx).await?;
     cx.update(|cx| claims::claim(metadata.thread_id, &client, duration, cx))?;
-    Ok(json!({
+
+    // Where the thread stands, so the program can carry on from here.
+    let handoff = super::handoff_json(&params.id, None, cx).await;
+    let mut result = json!({
         "claimed": true,
         "id": params.id,
         "minutes": duration.as_secs() / 60,
-        "note": "Each message you send keeps the claim alive. Call release_thread when you are done."
-    }))
+        "note": "Each message you send keeps the claim alive. Call release_thread, with a note on what you did and what is left, when you are done.",
+    });
+    match handoff {
+        Ok(handoff) => result["handoff"] = handoff,
+        Err(error) => result["handoff_error"] = json!(format!("{error:#}")),
+    }
+    Ok(result)
 }
 
+#[derive(Deserialize)]
+struct ReleaseThreadParams {
+    id: String,
+    /// What was done and what is left. Put in the thread's message box for the
+    /// person to read and send; nothing is sent.
+    note: Option<String>,
+}
+
+const MAX_NOTE_CHARS: usize = 5_000;
+
 pub async fn release_thread(raw: Value, cx: &mut AsyncApp) -> Result<Value> {
-    let params: ThreadIdParams = parse(raw.clone(), "release_thread")?;
+    let params: ReleaseThreadParams = parse(raw.clone(), "release_thread")?;
     let client = client_of(&raw);
+    let note = match params.note.as_deref().map(str::trim) {
+        Some("") | None => None,
+        Some(note) if note.len() > MAX_NOTE_CHARS => {
+            bail!("the note is too long (at most {MAX_NOTE_CHARS} characters)")
+        }
+        Some(note) => Some(note.to_string()),
+    };
     let metadata = cx.update(|cx| find_thread_metadata(&params.id, cx))?;
     let released = cx.update(|cx| claims::release(metadata.thread_id, Some(&client), cx));
-    Ok(json!({ "released": released, "id": params.id }))
+
+    // The note goes in the message box, unsent, so the person decides when the
+    // thread's own agent hears about it. It is only for a program that held the claim.
+    let mut left_note = false;
+    if released && let Some(note) = note {
+        if let Some((window, view)) = cx.update(|cx| find_open_thread_view(metadata.thread_id, cx))
+        {
+            let text = format!("Handover from {client}:\n{note}");
+            left_note = window
+                .update(cx, |_, window, cx| {
+                    view.update(cx, |view, cx| {
+                        view.message_editor.update(cx, |editor, cx| {
+                            let existing = editor.text(cx);
+                            let combined = if existing.trim().is_empty() {
+                                text
+                            } else {
+                                format!("{}\n\n{text}", existing.trim_end())
+                            };
+                            editor.set_text(&combined, window, cx);
+                        });
+                    });
+                })
+                .is_ok();
+        }
+    }
+    Ok(json!({
+        "released": released,
+        "id": params.id,
+        "note_left_in_message_box": left_note,
+    }))
 }

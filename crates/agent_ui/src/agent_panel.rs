@@ -11830,6 +11830,187 @@ mod tests {
         );
     }
 
+    fn composer_text(panel: &Entity<AgentPanel>, cx: &mut VisualTestContext) -> String {
+        panel.read_with(cx, |panel, cx| {
+            panel
+                .active_thread_view(cx)
+                .expect("a thread is open")
+                .read(cx)
+                .message_editor
+                .read(cx)
+                .text(cx)
+        })
+    }
+
+    #[gpui::test]
+    async fn test_a_handoff_says_where_a_thread_stands_without_taking_it(cx: &mut TestAppContext) {
+        use settings::{ThreadControlMode, ThreadControlPermission};
+        let (_panel, mut cx, thread_id) = setup_panel_with_thread(cx).await;
+        cx.update(|_, cx| crate::thread_control::claims::init(cx));
+        set_thread_control(
+            ThreadControlMode::ReadWrite,
+            ThreadControlPermission::Allow,
+            &[],
+            &mut cx,
+        );
+        control_call(
+            "send_message",
+            json!({ "id": thread_id.clone(), "text": "make the build faster" }),
+            &mut cx,
+        )
+        .await
+        .unwrap();
+        cx.run_until_parked();
+
+        // Reading a handoff works even when only reading is allowed.
+        set_thread_control(
+            ThreadControlMode::ReadOnly,
+            ThreadControlPermission::Deny,
+            &[],
+            &mut cx,
+        );
+        let handoff = control_call("get_handoff", json!({ "id": thread_id.clone() }), &mut cx)
+            .await
+            .unwrap();
+        assert_eq!(handoff["goal"], "make the build faster");
+        assert!(
+            handoff["title"]
+                .as_str()
+                .is_some_and(|title| !title.is_empty())
+        );
+        assert_eq!(handoff["status"], "idle");
+        assert_eq!(handoff["folders"], json!(["/project"]));
+        assert!(handoff["recent_messages"].as_array().unwrap().len() >= 1);
+        assert_eq!(
+            handoff["claimed_by"],
+            serde_json::Value::Null,
+            "it did not take the thread"
+        );
+        assert_eq!(claim_holder(&thread_id, &mut cx), None);
+
+        let error = control_call("get_handoff", json!({ "id": "nope" }), &mut cx)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("no thread with id"), "{error}");
+    }
+
+    #[gpui::test]
+    async fn test_claiming_returns_the_handoff_and_releasing_leaves_a_note_unsent(
+        cx: &mut TestAppContext,
+    ) {
+        use settings::{ThreadControlMode, ThreadControlPermission};
+        let (panel, mut cx, thread_id) = setup_panel_with_thread(cx).await;
+        cx.update(|_, cx| crate::thread_control::claims::init(cx));
+        set_thread_control(
+            ThreadControlMode::ReadWrite,
+            ThreadControlPermission::Allow,
+            &[],
+            &mut cx,
+        );
+        control_call(
+            "send_message",
+            json!({ "id": thread_id.clone(), "text": "fix the flaky test" }),
+            &mut cx,
+        )
+        .await
+        .unwrap();
+        cx.run_until_parked();
+
+        let claimed = control_call(
+            "claim_thread",
+            json!({ "id": thread_id.clone(), "_client": "Claude" }),
+            &mut cx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(claimed["handoff"]["goal"], "fix the flaky test");
+        assert_eq!(claimed["handoff"]["claimed_by"], "Claude");
+        assert!(composer_is_locked(&panel, &mut cx));
+
+        // A note from a program that does not hold the claim is not left anywhere.
+        let ignored = control_call(
+            "release_thread",
+            json!({ "id": thread_id.clone(), "note": "sneaky", "_client": "Other" }),
+            &mut cx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(ignored["note_left_in_message_box"], false);
+        assert_eq!(composer_text(&panel, &mut cx), "");
+
+        let entries_before = panel.read_with(&cx, |panel, cx| {
+            panel
+                .active_thread_view(cx)
+                .unwrap()
+                .read(cx)
+                .thread
+                .read(cx)
+                .entries()
+                .len()
+        });
+        let released = control_call(
+            "release_thread",
+            json!({
+                "id": thread_id.clone(),
+                "note": "Fixed it by pinning the seed. Still to do: the CI cache.",
+                "_client": "Claude"
+            }),
+            &mut cx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(released["released"], true);
+        assert_eq!(released["note_left_in_message_box"], true);
+        assert!(!composer_is_locked(&panel, &mut cx));
+        assert_eq!(
+            composer_text(&panel, &mut cx),
+            "Handover from Claude:\nFixed it by pinning the seed. Still to do: the CI cache."
+        );
+        cx.run_until_parked();
+        let entries_after = panel.read_with(&cx, |panel, cx| {
+            panel
+                .active_thread_view(cx)
+                .unwrap()
+                .read(cx)
+                .thread
+                .read(cx)
+                .entries()
+                .len()
+        });
+        assert_eq!(
+            entries_before, entries_after,
+            "the note is not sent, only left for the person"
+        );
+
+        // What the person had already typed is kept above the note.
+        panel.update_in(&mut cx, |panel, window, cx| {
+            let view = panel.active_thread_view(cx).unwrap();
+            view.update(cx, |view, cx| {
+                view.message_editor.update(cx, |editor, cx| {
+                    editor.set_text("a half-written reply", window, cx)
+                });
+            });
+        });
+        control_call(
+            "claim_thread",
+            json!({ "id": thread_id.clone(), "_client": "Claude" }),
+            &mut cx,
+        )
+        .await
+        .unwrap();
+        control_call(
+            "release_thread",
+            json!({ "id": thread_id.clone(), "note": "All done.", "_client": "Claude" }),
+            &mut cx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            composer_text(&panel, &mut cx),
+            "a half-written reply\n\nHandover from Claude:\nAll done."
+        );
+    }
+
     #[gpui::test]
     async fn test_taking_a_thread_back_unlocks_it(cx: &mut TestAppContext) {
         use settings::{ThreadControlMode, ThreadControlPermission};

@@ -14,6 +14,7 @@
 
 pub(crate) mod actions;
 pub(crate) mod claims;
+mod handoff;
 mod policy;
 
 use crate::AgentPanel;
@@ -248,6 +249,7 @@ pub(crate) async fn handle_request(
         "list_projects" => cx.update(|cx| list_projects(cx)),
         "list_threads" => cx.update(|cx| list_threads(params, cx)),
         "get_thread" => get_thread(params, cx).await,
+        "get_handoff" => get_handoff(params, cx).await,
         "get_permissions" => cx.update(|cx| Ok(Policy::current(cx).describe())),
         "claim_thread" => actions::claim_thread(params, cx).await,
         "release_thread" => actions::release_thread(params, cx).await,
@@ -466,42 +468,7 @@ async fn get_thread(params: Value, cx: &mut AsyncApp) -> Result<Value> {
         .unwrap_or(DEFAULT_ENTRY_LIMIT)
         .min(MAX_ENTRY_LIMIT);
 
-    enum Source {
-        Live(Entity<AcpThread>),
-        /// A thread of Zed's own agent, saved in the threads database.
-        Saved(acp::SessionId),
-        /// A thread of an external agent, whose history the agent keeps and
-        /// replays when the thread is loaded.
-        External(ThreadMetadata),
-    }
-
-    let (metadata, source) = cx.update(|cx| -> Result<_> {
-        let metadata = find_thread_metadata(&params.id, cx)?;
-
-        for workspace in workspaces(cx) {
-            let Some(panel) = workspace.read(cx).panel::<AgentPanel>(cx) else {
-                continue;
-            };
-            for view in panel.read(cx).conversation_views() {
-                let view = view.read(cx);
-                if view.thread_id == metadata.thread_id
-                    && let Some(thread) = view.root_thread(cx)
-                {
-                    return Ok((metadata, Source::Live(thread)));
-                }
-            }
-        }
-
-        let session_id = metadata
-            .session_id
-            .clone()
-            .context("this thread is a draft and has no messages")?;
-        if metadata.agent_id.as_ref() == agent::ZED_AGENT_ID.as_ref() {
-            Ok((metadata, Source::Saved(session_id)))
-        } else {
-            Ok((metadata.clone(), Source::External(metadata)))
-        }
-    })?;
+    let (metadata, source) = resolve_source(&params.id, cx)?;
 
     let (status, entries): (&str, Vec<Value>) = match source {
         Source::Live(thread) => cx.update(|cx| {
@@ -565,6 +532,114 @@ async fn get_thread(params: Value, cx: &mut AsyncApp) -> Result<Value> {
         "offset": params.offset,
         "entries": entries,
     }))
+}
+
+enum Source {
+    Live(Entity<AcpThread>),
+    /// A thread of Zed's own agent, saved in the threads database.
+    Saved(acp::SessionId),
+    /// A thread of an external agent, whose history the agent keeps and
+    /// replays when the thread is loaded.
+    External(ThreadMetadata),
+}
+
+/// Finds a thread and where its history is to be had from.
+fn resolve_source(id: &str, cx: &mut AsyncApp) -> Result<(ThreadMetadata, Source)> {
+    cx.update(|cx| -> Result<_> {
+        let metadata = find_thread_metadata(id, cx)?;
+
+        for workspace in workspaces(cx) {
+            let Some(panel) = workspace.read(cx).panel::<AgentPanel>(cx) else {
+                continue;
+            };
+            for view in panel.read(cx).conversation_views() {
+                let view = view.read(cx);
+                if view.thread_id == metadata.thread_id
+                    && let Some(thread) = view.root_thread(cx)
+                {
+                    return Ok((metadata, Source::Live(thread)));
+                }
+            }
+        }
+
+        let session_id = metadata
+            .session_id
+            .clone()
+            .context("this thread is a draft and has no messages")?;
+        if metadata.agent_id.as_ref() == agent::ZED_AGENT_ID.as_ref() {
+            Ok((metadata, Source::Saved(session_id)))
+        } else {
+            Ok((metadata.clone(), Source::External(metadata)))
+        }
+    })
+}
+
+#[derive(Deserialize)]
+struct GetHandoffParams {
+    id: String,
+    /// How many of the latest messages to include.
+    recent: Option<usize>,
+}
+
+async fn get_handoff(params: Value, cx: &mut AsyncApp) -> Result<Value> {
+    let params: GetHandoffParams =
+        serde_json::from_value(params).context("get_handoff needs an id")?;
+    handoff_json(&params.id, params.recent, cx).await
+}
+
+/// Where a thread stands, for a program about to carry on the work itself.
+pub(crate) async fn handoff_json(
+    id: &str,
+    recent: Option<usize>,
+    cx: &mut AsyncApp,
+) -> Result<Value> {
+    let (metadata, source) = resolve_source(id, cx)?;
+    let (digest, status) = match source {
+        Source::Live(thread) => cx.update(|cx| {
+            let thread = thread.read(cx);
+            (
+                handoff::Digest::from_thread(thread, cx),
+                handoff::status_name(thread),
+            )
+        }),
+        Source::External(metadata) => {
+            let thread = load_external_thread(&metadata, cx).await?;
+            cx.update(|cx| (handoff::Digest::from_thread(thread.read(cx), cx), "idle"))
+        }
+        Source::Saved(session_id) => {
+            let load = cx.update(|cx| {
+                ThreadStore::global(cx).update(cx, |store, cx| store.load_thread(session_id, cx))
+            });
+            let thread = load.await?.context("the saved thread could not be found")?;
+            let messages = thread
+                .messages
+                .iter()
+                .filter_map(|message| match message_role(message) {
+                    "other" => None,
+                    role => Some((role, message.to_markdown())),
+                })
+                .collect();
+            (handoff::Digest::from_messages(messages), "idle")
+        }
+    };
+    let claimed_by = cx.update(|cx| claims::holder(metadata.thread_id, cx));
+    let mut value = digest.to_json(
+        recent.unwrap_or(handoff::DEFAULT_RECENT_MESSAGES),
+        status,
+        claimed_by,
+    );
+    value["id"] = json!(id);
+    value["title"] = json!(metadata.display_title());
+    value["agent"] = json!(metadata.agent_id.to_string());
+    value["folders"] = json!(
+        metadata
+            .folder_paths()
+            .paths()
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+    );
+    Ok(value)
 }
 
 /// Replays an external agent's thread in the background, without opening it in
