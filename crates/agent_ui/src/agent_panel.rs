@@ -11751,6 +11751,629 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn test_thread_control_lists_the_open_projects_within_the_limited_folders(
+        cx: &mut TestAppContext,
+    ) {
+        use settings::{ThreadControlMode, ThreadControlPermission};
+        let (_panel, mut cx, _thread_id) = setup_panel_with_thread(cx).await;
+        set_thread_control(
+            ThreadControlMode::ReadOnly,
+            ThreadControlPermission::Deny,
+            &[],
+            &mut cx,
+        );
+
+        let listed = control_call("list_projects", json!({}), &mut cx)
+            .await
+            .unwrap();
+        let projects = listed["projects"].as_array().unwrap();
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0]["name"], "project");
+        assert_eq!(projects[0]["paths"], json!(["/project"]));
+        assert_eq!(projects[0]["kind"], "local");
+
+        set_thread_control(
+            ThreadControlMode::ReadOnly,
+            ThreadControlPermission::Deny,
+            &["/elsewhere"],
+            &mut cx,
+        );
+        let listed = control_call("list_projects", json!({}), &mut cx)
+            .await
+            .unwrap();
+        assert_eq!(
+            listed["projects"],
+            json!([]),
+            "projects outside the limit are not listed"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_thread_control_reads_an_open_thread_in_pages(cx: &mut TestAppContext) {
+        use settings::{ThreadControlMode, ThreadControlPermission};
+        let (_panel, mut cx, thread_id) = setup_panel_with_thread(cx).await;
+        set_thread_control(
+            ThreadControlMode::ReadWrite,
+            ThreadControlPermission::Allow,
+            &[],
+            &mut cx,
+        );
+        control_call(
+            "send_message",
+            json!({ "id": thread_id.clone(), "text": "hello there" }),
+            &mut cx,
+        )
+        .await
+        .unwrap();
+        cx.run_until_parked();
+
+        let thread = control_call("get_thread", json!({ "id": thread_id.clone() }), &mut cx)
+            .await
+            .unwrap();
+        assert_eq!(thread["status"], "idle");
+        assert_eq!(thread["offset"], 0);
+        let entries = thread["entries"].as_array().unwrap();
+        assert_eq!(entries[0]["index"], 0);
+        assert_eq!(entries[0]["role"], "user");
+        assert!(entries[0]["text"].as_str().unwrap().contains("hello there"));
+        assert!(
+            entries[0]["sent_at"].is_string(),
+            "the time it was sent is included"
+        );
+        let total = thread["total_entries"].as_u64().unwrap();
+        assert!(total >= 1);
+
+        let past_the_end = control_call(
+            "get_thread",
+            json!({ "id": thread_id.clone(), "offset": total }),
+            &mut cx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(past_the_end["entries"], json!([]));
+        assert_eq!(past_the_end["total_entries"], total);
+
+        let limited = control_call(
+            "get_thread",
+            json!({ "id": thread_id, "limit": 1 }),
+            &mut cx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(limited["entries"].as_array().unwrap().len(), 1);
+    }
+
+    #[gpui::test]
+    async fn test_thread_control_reads_and_summarises_a_zed_agent_thread_saved_in_the_database(
+        cx: &mut TestAppContext,
+    ) {
+        use settings::{ThreadControlMode, ThreadControlPermission};
+        let (_panel, mut cx, _open_thread) = setup_panel_with_thread(cx).await;
+        set_thread_control(
+            ThreadControlMode::ReadOnly,
+            ThreadControlPermission::Deny,
+            &[],
+            &mut cx,
+        );
+
+        let user_message = agent::Message::User(agent::UserMessage {
+            id: acp_thread::ClientUserMessageId::new(),
+            content: vec![agent::UserMessageContent::Text("plan the release".into())].into(),
+            created_at: None,
+        });
+        let agent_message: agent::AgentMessage = serde_json::from_value(json!({
+            "content": [{ "Text": "Here is the plan." }],
+            "tool_results": {},
+        }))
+        .unwrap();
+        let db_thread = agent::DbThread {
+            title: "Release plan".into(),
+            messages: vec![
+                Arc::new(user_message),
+                Arc::new(agent::Message::Agent(agent_message)),
+                Arc::new(agent::Message::Resume),
+            ],
+            updated_at: chrono::Utc::now(),
+            detailed_summary: None,
+            initial_project_snapshot: None,
+            cumulative_token_usage: Default::default(),
+            request_token_usage: Default::default(),
+            model: None,
+            profile: None,
+            subagent_context: None,
+            speed: None,
+            thinking_enabled: false,
+            thinking_effort: None,
+            draft_prompt: None,
+            ui_scroll_position: None,
+            sandboxed_terminal_temp_dir: None,
+            sandbox_grants: Default::default(),
+        };
+        let session_id = acp::SessionId::new("saved-zed-thread");
+        let thread_store = cx.update(|_, cx| ThreadStore::global(cx));
+        thread_store
+            .update(&mut cx, |store, cx| {
+                store.save_thread(session_id.clone(), db_thread, PathList::default(), cx)
+            })
+            .await
+            .unwrap();
+        let thread_id = crate::thread_metadata_store::ThreadId::new();
+        cx.update(|_, cx| {
+            ThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                store.save(
+                    crate::thread_metadata_store::ThreadMetadata {
+                        thread_id,
+                        session_id: Some(session_id),
+                        agent_id: agent::ZED_AGENT_ID.clone(),
+                        title: Some("Release plan".into()),
+                        title_override: None,
+                        updated_at: chrono::Utc::now(),
+                        created_at: Some(chrono::Utc::now()),
+                        interacted_at: None,
+                        worktree_paths: WorktreePaths::from_folder_paths(&PathList::new(&[
+                            Path::new("/project"),
+                        ])),
+                        remote_connection: None,
+                        archived: false,
+                    },
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+        let id = thread_id.to_key_string();
+
+        let thread = control_call("get_thread", json!({ "id": id.clone() }), &mut cx)
+            .await
+            .unwrap();
+        let entries = thread["entries"].as_array().unwrap();
+        assert_eq!(entries[0]["role"], "user");
+        assert!(
+            entries[0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("plan the release")
+        );
+        assert_eq!(entries[1]["role"], "assistant");
+        assert!(
+            entries[1]["text"]
+                .as_str()
+                .unwrap()
+                .contains("Here is the plan.")
+        );
+        assert_eq!(
+            entries[2]["role"], "other",
+            "a resume marker is not a message"
+        );
+
+        let handoff = control_call("get_handoff", json!({ "id": id }), &mut cx)
+            .await
+            .unwrap();
+        assert_eq!(handoff["goal"].as_str().unwrap().trim(), "plan the release");
+        assert_eq!(handoff["last_message_was_from"], "assistant");
+        assert_eq!(
+            handoff["messages_in_thread"], 2,
+            "markers are left out of the summary"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_a_handoff_lists_files_tool_calls_and_what_is_waiting_for_you(
+        cx: &mut TestAppContext,
+    ) {
+        use agent::{AgentTool as _, TerminalTool, ToolPermissionContext};
+        use settings::{ThreadControlMode, ThreadControlPermission};
+        let (panel, mut cx) = setup_visible_panel(cx).await;
+        set_thread_control(
+            ThreadControlMode::ReadOnly,
+            ThreadControlPermission::Deny,
+            &[],
+            &mut cx,
+        );
+
+        let edit = acp::ToolCall::new("edit-1", "Edit src/main.rs")
+            .kind(acp::ToolKind::Edit)
+            .status(acp::ToolCallStatus::Completed)
+            .locations(vec![acp::ToolCallLocation::new("/project/src/main.rs")]);
+        let run = acp::ToolCall::new("run-1", "Run `cargo test`").kind(acp::ToolKind::Execute);
+        let connection =
+            StubAgentConnection::new().with_permission_requests(HashMap::from_iter([(
+                acp::ToolCallId::new("run-1"),
+                ToolPermissionContext::new(TerminalTool::NAME, vec!["cargo test".to_string()])
+                    .build_permission_options(),
+            )]));
+        connection.set_next_prompt_updates(vec![
+            acp::SessionUpdate::ToolCall(edit),
+            acp::SessionUpdate::ToolCall(run),
+        ]);
+        open_thread_with_connection(&panel, connection, &mut cx);
+        send_message(&panel, &mut cx);
+
+        let thread_id = panel.read_with(&cx, |panel, cx| {
+            panel.active_conversation_view().unwrap().read(cx).thread_id
+        });
+        cx.update(|_, cx| {
+            ThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                store.save(
+                    crate::thread_metadata_store::ThreadMetadata {
+                        thread_id,
+                        session_id: Some(acp::SessionId::new("tool-thread")),
+                        agent_id: agent::ZED_AGENT_ID.clone(),
+                        title: Some("Tool thread".into()),
+                        title_override: None,
+                        updated_at: chrono::Utc::now(),
+                        created_at: Some(chrono::Utc::now()),
+                        interacted_at: None,
+                        worktree_paths: WorktreePaths::from_folder_paths(&PathList::new(&[
+                            Path::new("/project"),
+                        ])),
+                        remote_connection: None,
+                        archived: false,
+                    },
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+        let id = thread_id.to_key_string();
+
+        let handoff = control_call("get_handoff", json!({ "id": id.clone() }), &mut cx)
+            .await
+            .unwrap();
+        assert_eq!(handoff["status"], "waiting_for_confirmation");
+        assert_eq!(handoff["goal"], "Hello");
+        assert_eq!(handoff["files_touched"], json!(["/project/src/main.rs"]));
+        assert_eq!(handoff["waiting_for_you"], json!(["Run `cargo test`"]));
+        let calls = handoff["recent_tool_calls"].as_array().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0]["title"], "Edit src/main.rs");
+        assert_eq!(calls[0]["status"], "Completed");
+        assert_eq!(calls[1]["status"], "Waiting for confirmation");
+
+        let thread = control_call("get_thread", json!({ "id": id }), &mut cx)
+            .await
+            .unwrap();
+        assert_eq!(thread["status"], "waiting_for_confirmation");
+        let tool_entries: Vec<_> = thread["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|entry| entry["role"] == "tool_call")
+            .collect();
+        assert_eq!(tool_entries.len(), 2);
+        assert_eq!(tool_entries[0]["status"], "Completed");
+    }
+
+    async fn listed_status(thread_id: &str, cx: &mut VisualTestContext) -> String {
+        let listed = control_call("list_threads", json!({}), cx).await.unwrap();
+        listed["threads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|thread| thread["id"] == thread_id)
+            .map(|thread| thread["status"].as_str().unwrap().to_string())
+            .expect("the thread is listed")
+    }
+
+    #[gpui::test]
+    async fn test_thread_control_cancels_a_running_turn(cx: &mut TestAppContext) {
+        use settings::{ThreadControlMode, ThreadControlPermission};
+        let (panel, mut cx) = setup_visible_panel(cx).await;
+        set_thread_control(
+            ThreadControlMode::ReadWrite,
+            ThreadControlPermission::Allow,
+            &[],
+            &mut cx,
+        );
+
+        // A thread whose agent never answers, so it stays running.
+        let connection = StubAgentConnection::new();
+        open_thread_with_connection(&panel, connection.clone(), &mut cx);
+        send_message(&panel, &mut cx);
+        let thread_id = panel.read_with(&cx, |panel, cx| {
+            panel.active_conversation_view().unwrap().read(cx).thread_id
+        });
+        let session_id = active_session_id(&panel, &cx);
+        // A chunk without an end keeps the turn running.
+        cx.update(|_, cx| {
+            connection.send_update(
+                session_id.clone(),
+                acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new("working".into())),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        let save = |cx: &mut VisualTestContext| {
+            cx.update(|_, cx| {
+                ThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                    store.save(
+                        crate::thread_metadata_store::ThreadMetadata {
+                            thread_id,
+                            session_id: Some(session_id.clone()),
+                            agent_id: agent::ZED_AGENT_ID.clone(),
+                            title: Some("Running thread".into()),
+                            title_override: None,
+                            updated_at: chrono::Utc::now(),
+                            created_at: Some(chrono::Utc::now()),
+                            interacted_at: None,
+                            worktree_paths: WorktreePaths::from_folder_paths(&PathList::new(&[
+                                Path::new("/project"),
+                            ])),
+                            remote_connection: None,
+                            archived: false,
+                        },
+                        cx,
+                    );
+                });
+            });
+        };
+        save(&mut cx);
+        cx.run_until_parked();
+        let id = thread_id.to_key_string();
+        assert_eq!(listed_status(&id, &mut cx).await, "running");
+
+        // A busy thread cannot be sent to, but it can be cancelled.
+        let error = control_call(
+            "send_message",
+            json!({ "id": id.clone(), "text": "are you there" }),
+            &mut cx,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("busy"), "{error}");
+        let cancelled = control_call("cancel_turn", json!({ "id": id.clone() }), &mut cx)
+            .await
+            .unwrap();
+        assert_eq!(cancelled["cancelled"], true);
+        cx.run_until_parked();
+        assert_eq!(
+            listed_status(&id, &mut cx).await,
+            "idle",
+            "cancelling stopped the agent"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_thread_control_opens_a_saved_thread_to_send_to_it(cx: &mut TestAppContext) {
+        use settings::{ThreadControlMode, ThreadControlPermission};
+        let (panel, mut cx) = setup_visible_panel(cx).await;
+        cx.run_until_parked();
+        panel.update(&mut cx, |panel, cx| {
+            panel.connection_store.update(cx, |store, cx| {
+                store.restart_connection(
+                    Agent::Stub,
+                    Rc::new(StubAgentServer::new(SessionTrackingConnection::new())),
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+        set_thread_control(
+            ThreadControlMode::ReadWrite,
+            ThreadControlPermission::Allow,
+            &[],
+            &mut cx,
+        );
+
+        // A saved thread of an external agent that is not open anywhere.
+        let thread_id = crate::thread_metadata_store::ThreadId::new();
+        cx.update(|_, cx| {
+            ThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                store.save(
+                    crate::thread_metadata_store::ThreadMetadata {
+                        thread_id,
+                        session_id: Some(acp::SessionId::new("saved-external")),
+                        agent_id: project::AgentId::new("stub"),
+                        title: Some("Saved external thread".into()),
+                        title_override: None,
+                        updated_at: chrono::Utc::now(),
+                        created_at: Some(chrono::Utc::now()),
+                        interacted_at: None,
+                        worktree_paths: WorktreePaths::from_folder_paths(&PathList::new(&[
+                            Path::new("/project"),
+                        ])),
+                        remote_connection: None,
+                        archived: false,
+                    },
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+        assert!(
+            panel.read_with(&cx, |panel, cx| panel
+                .conversation_views()
+                .iter()
+                .all(|view| view.read(cx).thread_id != thread_id)),
+            "the saved thread is not open yet"
+        );
+
+        control_call(
+            "send_message",
+            json!({ "id": thread_id.to_key_string(), "text": "continue please" }),
+            &mut cx,
+        )
+        .await
+        .unwrap();
+        cx.run_until_parked();
+
+        let (open_id, user_messages) = panel.read_with(&cx, |panel, cx| {
+            let view = panel
+                .active_conversation_view()
+                .expect("the thread was opened");
+            let user_messages: Vec<String> = view
+                .read(cx)
+                .root_thread(cx)
+                .map(|thread| {
+                    thread
+                        .read(cx)
+                        .entries()
+                        .iter()
+                        .filter_map(|entry| match entry {
+                            acp_thread::AgentThreadEntry::UserMessage(message) => {
+                                Some(message.content.to_markdown(cx).to_string())
+                            }
+                            _ => None,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            (view.read(cx).thread_id, user_messages)
+        });
+        assert_eq!(
+            open_id, thread_id,
+            "the saved thread is the one that opened"
+        );
+        assert_eq!(
+            user_messages.last().map(String::as_str),
+            Some("continue please"),
+            "the message follows the history that was replayed: {user_messages:?}"
+        );
+
+        // A thread whose project is not open cannot be opened.
+        let elsewhere = crate::thread_metadata_store::ThreadId::new();
+        cx.update(|_, cx| {
+            ThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                store.save(
+                    crate::thread_metadata_store::ThreadMetadata {
+                        thread_id: elsewhere,
+                        session_id: Some(acp::SessionId::new("closed-project")),
+                        agent_id: project::AgentId::new("stub"),
+                        title: Some("Closed project thread".into()),
+                        title_override: None,
+                        updated_at: chrono::Utc::now(),
+                        created_at: Some(chrono::Utc::now()),
+                        interacted_at: None,
+                        worktree_paths: WorktreePaths::from_folder_paths(&PathList::new(&[
+                            Path::new("/not-open"),
+                        ])),
+                        remote_connection: None,
+                        archived: false,
+                    },
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+        let error = control_call(
+            "send_message",
+            json!({ "id": elsewhere.to_key_string(), "text": "hello?" }),
+            &mut cx,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("is not open in Zed"), "{error}");
+    }
+
+    #[gpui::test]
+    async fn test_a_thread_tab_is_saved_restored_and_cleaned_up_with_its_workspace(
+        cx: &mut TestAppContext,
+    ) {
+        use workspace::SerializableItem as _;
+        let (panel, mut cx, thread_id) = setup_panel_with_thread(cx).await;
+        let (workspace, project) = panel.read_with(&cx, |panel, cx| {
+            let workspace = panel.workspace.upgrade().expect("workspace is alive");
+            let project = workspace.read(cx).project().clone();
+            (workspace, project)
+        });
+        let workspace_id = cx
+            .update(|_, cx| workspace::WorkspaceDb::global(cx))
+            .next_id()
+            .await
+            .expect("a workspace row can be created");
+        workspace.update(&mut cx, |workspace, _| {
+            workspace.set_database_id_for_test(workspace_id)
+        });
+
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.open_thread_in_new_tab(&OpenThreadInNewTab, window, cx);
+        });
+        cx.run_until_parked();
+        let (view, item_id) = workspace.read_with(&cx, |workspace, cx| {
+            let view = workspace
+                .active_pane()
+                .read(cx)
+                .items()
+                .find_map(|item| item.downcast::<ConversationView>())
+                .expect("the thread is a tab");
+            let item_id = view.entity_id().as_u64() as workspace::ItemId;
+            (view, item_id)
+        });
+        assert_eq!(
+            ConversationView::serialized_item_kind(),
+            "AgentConversation"
+        );
+        assert!(!view.read_with(&cx, |view, _| {
+            view.should_serialize(
+                &crate::conversation_view::AcpServerViewEvent::ActiveThreadChanged,
+            )
+        }));
+
+        // Saving records which thread the tab shows.
+        let save = workspace
+            .update_in(&mut cx, |workspace, _, cx| {
+                view.update(cx, |view, cx| view.serialize(workspace, item_id, false, cx))
+            })
+            .expect("a tab in a saved workspace is serialized");
+        save.await.unwrap();
+
+        // Restoring loads that thread again.
+        let restored = cx
+            .update(|window, cx| {
+                ConversationView::deserialize(
+                    project.clone(),
+                    workspace.downgrade(),
+                    workspace_id,
+                    item_id,
+                    window,
+                    cx,
+                )
+            })
+            .await
+            .expect("the saved tab is restored");
+        assert_eq!(
+            restored.read_with(&cx, |view, _| view.thread_id.to_key_string()),
+            thread_id
+        );
+
+        // A tab that was never saved cannot be restored, and nor can one whose thread is gone.
+        let error = cx
+            .update(|window, cx| {
+                ConversationView::deserialize(
+                    project.clone(),
+                    workspace.downgrade(),
+                    workspace_id,
+                    item_id + 1000,
+                    window,
+                    cx,
+                )
+            })
+            .await
+            .err()
+            .expect("no thread was recorded");
+        assert!(error.to_string().contains("no thread recorded"), "{error}");
+
+        // Closing the tab drops its record, while open tabs keep theirs.
+        cx.update(|window, cx| ConversationView::cleanup(workspace_id, vec![item_id], window, cx))
+            .await
+            .unwrap();
+        let db = cx.update(|_, cx| {
+            crate::conversation_view::conversation_tab_persistence::ConversationTabDb::global(cx)
+        });
+        assert_eq!(
+            db.get_thread_id(item_id, workspace_id)
+                .unwrap()
+                .map(|id| id.to_key_string()),
+            Some(thread_id.clone()),
+            "an alive tab keeps its record"
+        );
+        cx.update(|window, cx| ConversationView::cleanup(workspace_id, Vec::new(), window, cx))
+            .await
+            .unwrap();
+        assert_eq!(db.get_thread_id(item_id, workspace_id).unwrap(), None);
+    }
+
+    #[gpui::test]
     async fn test_claiming_a_thread_locks_the_message_box_until_released(cx: &mut TestAppContext) {
         use settings::{ThreadControlMode, ThreadControlPermission};
         let (panel, mut cx, thread_id) = setup_panel_with_thread(cx).await;

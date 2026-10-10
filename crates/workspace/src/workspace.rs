@@ -98,8 +98,8 @@ pub use persistence::{
 use persistence::{SerializedWindowBounds, model::SerializedWorkspace};
 use postage::stream::Stream;
 use project::{
-    DirectoryLister, Project, ProjectEntryId, ProjectPath, ResolvedPath, Worktree, WorktreeId,
-    WindowAccentColorSettings, WorktreeSettings,
+    DirectoryLister, Project, ProjectEntryId, ProjectPath, ResolvedPath, WindowAccentColorSettings,
+    Worktree, WorktreeId, WorktreeSettings,
     debugger::{breakpoint_store::BreakpointStoreEvent, session::ThreadStatus},
     git_store::{GitStoreEvent, RepositoryEvent},
     project_settings::ProjectSettings,
@@ -8450,6 +8450,13 @@ impl Workspace {
             }))
             .on_action(cx.listener(Workspace::clear_bookmarks))
             .on_action(cx.listener(Workspace::cancel))
+    }
+
+    /// Gives the workspace a database id that already has a row, so items can be
+    /// serialized against it.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_database_id_for_test(&mut self, id: WorkspaceId) {
+        self.database_id = Some(id);
     }
 
     #[cfg(any(test, feature = "test-support"))]

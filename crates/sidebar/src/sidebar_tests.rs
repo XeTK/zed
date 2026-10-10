@@ -1033,6 +1033,249 @@ async fn test_unread_threads_are_not_archived(cx: &mut TestAppContext) {
     assert!(is_archived("thread-1", cx));
 }
 
+#[test]
+fn test_project_type_icons_name_each_kind_of_project() {
+    use remote::{DockerConnectionOptions, LocalProcessConnectionOptions, WslConnectionOptions};
+
+    assert_eq!(project_type_icon(None), (IconName::Screen, "Local project"));
+    assert_eq!(
+        project_type_icon(Some(&RemoteConnectionOptions::Ssh(
+            remote::SshConnectionOptions::default()
+        ))),
+        (IconName::Server, "Remote project (SSH)")
+    );
+    assert_eq!(
+        project_type_icon(Some(&RemoteConnectionOptions::Wsl(WslConnectionOptions {
+            distro_name: "Ubuntu".into(),
+            user: None,
+        }))),
+        (IconName::Linux, "Remote project (WSL)")
+    );
+    assert_eq!(
+        project_type_icon(Some(&RemoteConnectionOptions::Docker(
+            DockerConnectionOptions::default()
+        ))),
+        (IconName::Box, "Remote project (container)")
+    );
+    assert_eq!(
+        project_type_icon(Some(&RemoteConnectionOptions::LocalProcess(
+            LocalProcessConnectionOptions {
+                id: "app-0123".into()
+            }
+        ))),
+        (IconName::Blocks, "Local project in its own process")
+    );
+}
+
+#[gpui::test]
+async fn test_show_more_row_works_from_the_keyboard(cx: &mut TestAppContext) {
+    let project = init_test_project("/my-project", cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let sidebar = setup_sidebar(&multi_workspace, cx);
+    save_n_test_threads(7, &project, cx).await;
+    cx.run_until_parked();
+
+    let show_more_ix = sidebar.read_with(cx, |sidebar, _| {
+        sidebar
+            .contents
+            .entries
+            .iter()
+            .position(|entry| matches!(entry, ListEntry::ShowMore { .. }))
+            .expect("seven threads leave a Show more row")
+    });
+    sidebar.update_in(cx, |sidebar, window, cx| {
+        sidebar.selection = Some(show_more_ix);
+        sidebar.confirm(&menu::Confirm, window, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        visible_entries_as_strings(&sidebar, cx)
+            .last()
+            .map(String::as_str),
+        Some("  [Show fewer]"),
+        "Enter on the row reveals the rest"
+    );
+
+    // Folding from the row collapses its project, and unfolding brings it back.
+    sidebar.update_in(cx, |sidebar, window, cx| {
+        let last = sidebar.contents.entries.len() - 1;
+        sidebar.selection = Some(last);
+        sidebar.toggle_selected_fold(&editor::actions::ToggleFold, window, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        visible_entries_as_strings(&sidebar, cx),
+        vec!["> [my-project]  <== selected"]
+    );
+    sidebar.update_in(cx, |sidebar, window, cx| {
+        sidebar.selection = Some(0);
+        sidebar.toggle_selected_fold(&editor::actions::ToggleFold, window, cx);
+    });
+    cx.run_until_parked();
+    assert!(visible_entries_as_strings(&sidebar, cx).len() > 1);
+}
+
+#[gpui::test]
+async fn test_the_active_thread_and_unread_terminals_stay_visible_past_the_limit(
+    cx: &mut TestAppContext,
+) {
+    let project = init_test_project_with_agent_panel("/my-project", cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let fixture = SidebarClickFixture::new(&multi_workspace, cx);
+    save_n_test_threads(7, &project, cx).await;
+    cx.run_until_parked();
+
+    let titles =
+        |cx: &mut gpui::VisualTestContext| visible_entries_as_strings(&fixture.sidebar, cx);
+    let thread_one = acp::SessionId::new(Arc::from("thread-0"));
+    let thread_one_id = cx.update(|_, cx| {
+        ThreadMetadataStore::global(cx)
+            .read(cx)
+            .entry_by_session(&thread_one)
+            .map(|metadata| metadata.thread_id)
+            .expect("saved")
+    });
+    assert!(
+        !titles(cx).iter().any(|row| row.contains("Thread 1")),
+        "the oldest thread is hidden: {:?}",
+        titles(cx)
+    );
+
+    // Opening it makes it the active entry, which is never hidden.
+    let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+    fixture.sidebar.update(cx, |sidebar, cx| {
+        sidebar.active_entry = Some(ActiveEntry::Thread {
+            thread_id: thread_one_id,
+            session_id: Some(thread_one.clone()),
+            workspace: workspace.clone(),
+        });
+        sidebar.update_entries(cx);
+    });
+    cx.run_until_parked();
+    assert!(
+        titles(cx).iter().any(|row| row.contains("Thread 1")),
+        "{:?}",
+        titles(cx)
+    );
+    fixture.sidebar.update(cx, |sidebar, cx| {
+        sidebar.active_entry = None;
+        sidebar.update_entries(cx);
+    });
+
+    // Seven terminals, all newer than the threads: the two oldest are over the limit.
+    let terminal_ids: Vec<_> = (1..=7)
+        .map(|n| fixture.insert_terminal(&format!("Terminal {n}"), cx))
+        .collect();
+    cx.run_until_parked();
+    let oldest_terminal = terminal_ids[0];
+    let terminal_visible = |terminal_id, cx: &mut gpui::VisualTestContext| {
+        fixture.sidebar.read_with(cx, |sidebar, _| {
+            sidebar.contents.entries.iter().any(|entry| {
+                matches!(entry, ListEntry::Terminal(terminal) if terminal.metadata.terminal_id == terminal_id)
+            })
+        })
+    };
+    assert!(
+        terminal_visible(terminal_ids[6], cx),
+        "the newest terminal is shown"
+    );
+    assert!(
+        !terminal_visible(oldest_terminal, cx),
+        "the oldest is over the limit"
+    );
+
+    fixture.sidebar.update(cx, |sidebar, cx| {
+        sidebar.active_entry = Some(ActiveEntry::Terminal {
+            terminal_id: oldest_terminal,
+            workspace: workspace.clone(),
+        });
+        sidebar.update_entries(cx);
+    });
+    cx.run_until_parked();
+    assert!(
+        terminal_visible(oldest_terminal, cx),
+        "the active terminal is shown"
+    );
+}
+
+#[gpui::test]
+async fn test_stale_threads_are_archived_in_the_background_without_being_asked(
+    cx: &mut TestAppContext,
+) {
+    let project = init_test_project("/my-project", cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let _sidebar = setup_sidebar(&multi_workspace, cx);
+    save_n_test_threads(2, &project, cx).await;
+    cx.run_until_parked();
+    set_archive_after_days(30, cx);
+
+    assert!(
+        !is_archived("thread-0", cx),
+        "nothing is archived before the first pass"
+    );
+    cx.executor()
+        .advance_clock(ARCHIVE_STALE_THREADS_FIRST_DELAY + std::time::Duration::from_secs(1));
+    cx.run_until_parked();
+    assert!(
+        is_archived("thread-0", cx),
+        "the first pass archives the old threads"
+    );
+    assert!(is_archived("thread-1", cx));
+
+    // It keeps running: a thread that goes stale later is caught on a later pass.
+    save_thread_metadata(
+        acp::SessionId::new(Arc::from("late")),
+        Some("Late".into()),
+        chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 2, 0, 0, 0).unwrap(),
+        None,
+        None,
+        &project,
+        cx,
+    );
+    cx.run_until_parked();
+    assert!(!is_archived("late", cx));
+    cx.executor()
+        .advance_clock(ARCHIVE_STALE_THREADS_INTERVAL + std::time::Duration::from_secs(1));
+    cx.run_until_parked();
+    assert!(is_archived("late", cx));
+}
+
+#[gpui::test]
+async fn test_a_project_with_an_accent_color_still_switches_on_a_title_click(
+    cx: &mut TestAppContext,
+) {
+    let project_a = init_test_project_with_agent_panel("/project-a", cx).await;
+    cx.update(|cx| {
+        SettingsStore::update_global(cx, |store, cx| {
+            store.update_user_settings(cx, |content| {
+                content.project.window_accent_color =
+                    Some(serde_json::from_value(serde_json::json!("#3b82f6")).unwrap());
+            });
+        });
+    });
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a.clone(), window, cx));
+    let sidebar = setup_sidebar(&multi_workspace, cx);
+    cx.run_until_parked();
+
+    // The header is drawn with the accent behind the name and its text colour chosen
+    // to read on it.
+    cx.draw(
+        gpui::point(px(0.), px(0.)),
+        gpui::size(px(400.), px(400.)),
+        |_, _| sidebar.clone().into_any_element(),
+    );
+    let accent = multi_workspace.read_with(cx, |mw, cx| {
+        let key = mw.workspace().read(cx).project_group_key(cx);
+        mw.project_group_accent_color(&key, cx)
+    });
+    assert!(accent.is_some(), "the project has an accent color");
+    assert_eq!(visible_entries_as_strings(&sidebar, cx)[0], "v [project-a]");
+}
+
 #[gpui::test]
 async fn test_collapse_changes_entry_shape(cx: &mut TestAppContext) {
     let project = init_test_project("/my-project", cx).await;

@@ -628,6 +628,64 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn serve_one_reply(
+        socket: &std::path::Path,
+        reply: &'static str,
+    ) -> std::thread::JoinHandle<()> {
+        use std::os::unix::net::UnixListener;
+        let listener = UnixListener::bind(socket).unwrap();
+        std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut writer = stream.try_clone().unwrap();
+            let mut line = String::new();
+            std::io::BufReader::new(stream)
+                .read_line(&mut line)
+                .unwrap();
+            writeln!(writer, "{reply}").unwrap();
+        })
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_a_broken_control_file_or_reply_is_reported_clearly() {
+        let directory = tempfile::tempdir().unwrap();
+        let discovery = directory.path().join("control.json");
+        let socket = directory.path().join("s.sock");
+        let call = || call_control_server(&discovery, "list_threads", json!({}), None);
+
+        std::fs::write(&discovery, "not json").unwrap();
+        assert!(format!("{:#}", call().unwrap_err()).contains("control.json is not valid"));
+
+        std::fs::write(&discovery, json!({ "token": "t" }).to_string()).unwrap();
+        assert!(format!("{:#}", call().unwrap_err()).contains("has no socket"));
+
+        std::fs::write(&discovery, json!({ "socket": socket }).to_string()).unwrap();
+        assert!(format!("{:#}", call().unwrap_err()).contains("has no token"));
+
+        // Zed has quit: the file is there but nothing is listening.
+        std::fs::write(
+            &discovery,
+            json!({ "socket": socket, "token": "t" }).to_string(),
+        )
+        .unwrap();
+        assert!(format!("{:#}", call().unwrap_err()).contains("could not reach Zed"));
+
+        let server = serve_one_reply(&socket, "this is not json");
+        assert!(format!("{:#}", call().unwrap_err()).contains("invalid reply"));
+        server.join().unwrap();
+        std::fs::remove_file(&socket).unwrap();
+
+        let server = serve_one_reply(&socket, r#"{"ok":false,"error":"invalid token"}"#);
+        assert!(format!("{:#}", call().unwrap_err()).contains("invalid token"));
+        server.join().unwrap();
+        std::fs::remove_file(&socket).unwrap();
+
+        let server = serve_one_reply(&socket, r#"{"ok":false}"#);
+        assert!(format!("{:#}", call().unwrap_err()).contains("Zed refused the request"));
+        server.join().unwrap();
+    }
+
+    #[cfg(unix)]
     #[test]
     fn test_a_missing_control_file_says_how_to_turn_it_on() {
         let directory = tempfile::tempdir().unwrap();

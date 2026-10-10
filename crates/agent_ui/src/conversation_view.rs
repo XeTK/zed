@@ -3583,7 +3583,7 @@ impl SerializableItem for ConversationView {
     }
 }
 
-mod conversation_tab_persistence {
+pub(crate) mod conversation_tab_persistence {
     use crate::thread_metadata_store::ThreadId;
     use db::{
         query,

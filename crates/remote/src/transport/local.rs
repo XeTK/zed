@@ -92,10 +92,20 @@ impl LocalProcessConnection {
         delegate: Arc<dyn RemoteClientDelegate>,
         cx: &mut AsyncApp,
     ) -> Result<Self> {
-        delegate.set_status(Some("Starting project process"), cx);
-
         let server_binary = bundled_server_binary()?;
         let data_dir = options.data_dir();
+        Self::new_with(options, server_binary, data_dir, delegate, cx).await
+    }
+
+    async fn new_with(
+        options: LocalProcessConnectionOptions,
+        server_binary: PathBuf,
+        data_dir: PathBuf,
+        delegate: Arc<dyn RemoteClientDelegate>,
+        cx: &mut AsyncApp,
+    ) -> Result<Self> {
+        delegate.set_status(Some("Starting project process"), cx);
+
         smol::fs::create_dir_all(&data_dir)
             .await
             .with_context(|| format!("creating {}", data_dir.display()))?;
@@ -115,6 +125,10 @@ impl LocalProcessConnection {
 /// The `remote_server` binary that ships next to the editor's own executable.
 fn bundled_server_binary() -> Result<PathBuf> {
     let executable = std::env::current_exe().context("finding the editor's executable")?;
+    server_binary_beside(&executable)
+}
+
+fn server_binary_beside(executable: &Path) -> Result<PathBuf> {
     let directory = executable
         .parent()
         .context("the editor's executable has no directory")?;
@@ -327,6 +341,310 @@ impl RemoteConnection for LocalProcessConnection {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transport::mock::MockDelegate;
+    use futures::channel::mpsc;
+    use gpui::TestAppContext;
+    use std::os::unix::fs::PermissionsExt as _;
+    use util::paths::RemotePathBuf;
+
+    fn delegate() -> Arc<dyn RemoteClientDelegate> {
+        Arc::new(MockDelegate)
+    }
+
+    async fn connection(
+        directory: &Path,
+        server_binary: &Path,
+        cx: &mut TestAppContext,
+    ) -> LocalProcessConnection {
+        // Making the directory and running processes is real I/O.
+        cx.executor().allow_parking();
+        let options = LocalProcessConnectionOptions::for_paths([Path::new("/work/app")]);
+        let mut async_cx = cx.to_async();
+        LocalProcessConnection::new_with(
+            options,
+            server_binary.to_path_buf(),
+            directory.join("data"),
+            delegate(),
+            &mut async_cx,
+        )
+        .await
+        .unwrap()
+    }
+
+    fn write_script(path: &Path, body: &str) {
+        std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    fn test_the_server_binary_is_found_beside_the_executable() {
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("zed");
+        let error = server_binary_beside(&executable).unwrap_err();
+        assert!(error.to_string().contains("remote_server"), "{error}");
+
+        std::fs::write(directory.path().join("remote_server"), "").unwrap();
+        assert_eq!(
+            server_binary_beside(&executable).unwrap(),
+            directory.path().join("remote_server")
+        );
+        assert!(
+            server_binary_beside(Path::new("/")).is_err(),
+            "no directory to look in"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_starting_without_a_bundled_server_says_where_it_looked(cx: &mut TestAppContext) {
+        let options = LocalProcessConnectionOptions::for_paths([Path::new("/work/app")]);
+        let mut async_cx = cx.to_async();
+        // Tests run from a build directory that has no remote_server beside them.
+        let error = match LocalProcessConnection::new(options, delegate(), &mut async_cx).await {
+            Ok(_) => panic!("there is no bundled server to start"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("was not found"), "{error}");
+    }
+
+    #[gpui::test]
+    async fn test_a_connection_makes_its_data_directory_and_describes_itself(
+        cx: &mut TestAppContext,
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = connection(directory.path(), Path::new("/bin/true"), cx).await;
+
+        assert!(
+            directory.path().join("data").is_dir(),
+            "its own data directory exists"
+        );
+        assert_eq!(
+            connection.connection_options(),
+            RemoteConnectionOptions::LocalProcess(LocalProcessConnectionOptions::for_paths([
+                Path::new("/work/app")
+            ]))
+        );
+        assert_eq!(connection.path_style(), PathStyle::local());
+        let platform = connection.remote_platform();
+        assert!(platform.os == local_platform().os && platform.arch == local_platform().arch);
+        assert!(connection.remote_os_version().is_none());
+        assert!(!connection.shell().is_empty());
+        assert_eq!(connection.default_system_shell(), connection.shell());
+        assert!(!connection.has_wsl_interop());
+        assert!(connection.shares_network_interface());
+        assert!(!connection.has_been_killed());
+        connection.kill().await.unwrap();
+        assert!(
+            !connection.has_been_killed(),
+            "killing it does not stop the server"
+        );
+        assert!(
+            connection
+                .build_forward_ports_command(vec![(1, "localhost".into(), 2)])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn test_the_local_platform_matches_this_machine() {
+        let platform = local_platform();
+        assert_eq!(platform.os == RemoteOs::MacOs, cfg!(target_os = "macos"));
+        assert_eq!(platform.os == RemoteOs::Linux, cfg!(target_os = "linux"));
+        assert_eq!(
+            platform.arch == RemoteArch::Aarch64,
+            cfg!(target_arch = "aarch64")
+        );
+    }
+
+    #[gpui::test]
+    #[allow(clippy::disallowed_methods)] // runs the command it built, outside gpui
+    async fn test_a_built_command_runs_in_the_directory_with_the_environment_and_quoting(
+        cx: &mut TestAppContext,
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = connection(directory.path(), Path::new("/bin/true"), cx).await;
+        let working_dir = directory.path().canonicalize().unwrap();
+
+        let template = connection
+            .build_command(
+                Some("sh".to_string()),
+                &[
+                    "-c".to_string(),
+                    "printf '%s|%s|%s' \"$FOO\" \"$PWD\" \"$1\"".to_string(),
+                    "ignored".to_string(),
+                    "it's a \"quoted\" arg".to_string(),
+                ],
+                &HashMap::from_iter([("FOO".to_string(), "two words".to_string())]),
+                Some(working_dir.to_string_lossy().into_owned()),
+                None,
+                Interactive::No,
+            )
+            .unwrap();
+        let output = std::process::Command::new(&template.program)
+            .args(&template.args)
+            .envs(&template.env)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            format!("two words|{}|it's a \"quoted\" arg", working_dir.display())
+        );
+    }
+
+    #[gpui::test]
+    async fn test_build_command_without_a_program_starts_a_login_shell_and_refuses_port_forwards(
+        cx: &mut TestAppContext,
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = connection(directory.path(), Path::new("/bin/true"), cx).await;
+
+        let template = connection
+            .build_command(None, &[], &HashMap::default(), None, None, Interactive::Yes)
+            .unwrap();
+        let command = template.args.join(" ");
+        assert!(command.contains("exec env"), "{command}");
+        assert!(command.contains(" -l"), "a login shell: {command}");
+        assert!(
+            !command.contains("cd "),
+            "no directory was asked for: {command}"
+        );
+
+        let error = connection
+            .build_command(
+                Some("ls".to_string()),
+                &[],
+                &HashMap::default(),
+                None,
+                Some((8080, "localhost".to_string(), 80)),
+                Interactive::No,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("network"), "{error}");
+    }
+
+    #[gpui::test]
+    async fn test_upload_directory_copies_a_tree_and_reports_a_failure(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = connection(directory.path(), Path::new("/bin/true"), cx).await;
+        let source = directory.path().join("source");
+        std::fs::create_dir_all(source.join("nested")).unwrap();
+        std::fs::write(source.join("nested/file.txt"), "contents").unwrap();
+        let destination = directory.path().join("copy");
+
+        cx.executor().allow_parking();
+        let task = cx.update(|cx| {
+            connection.upload_directory(
+                source.clone(),
+                RemotePathBuf::new(
+                    destination.to_string_lossy().into_owned(),
+                    PathStyle::local(),
+                ),
+                cx,
+            )
+        });
+        task.await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(destination.join("nested/file.txt")).unwrap(),
+            "contents"
+        );
+
+        let task = cx.update(|cx| {
+            connection.upload_directory(
+                directory.path().join("missing"),
+                RemotePathBuf::new(
+                    destination.to_string_lossy().into_owned(),
+                    PathStyle::local(),
+                ),
+                cx,
+            )
+        });
+        let error = task.await.unwrap_err();
+        assert!(error.to_string().contains("failed to copy"), "{error}");
+    }
+
+    #[gpui::test]
+    async fn test_the_proxy_is_started_with_the_identifier_and_the_servers_own_data_directory(
+        cx: &mut TestAppContext,
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let record = directory.path().join("record");
+        std::fs::create_dir_all(&record).unwrap();
+        let server = directory.path().join("fake_remote_server");
+        write_script(
+            &server,
+            &format!(
+                "printf '%s\\n' \"$@\" > '{record}/args'\nprintf '%s' \"$ZED_REMOTE_SERVER_DATA_DIR\" > '{record}/data_dir'\ncat > /dev/null",
+                record = record.display()
+            ),
+        );
+        let connection = connection(directory.path(), &server, cx).await;
+        let data_dir = directory.path().join("data");
+
+        for (reconnect, expected) in [
+            (false, "proxy\n--identifier\nworkspace-7\n"),
+            (true, "proxy\n--identifier\nworkspace-7\n--reconnect\n"),
+        ] {
+            let (incoming_tx, _incoming_rx) = mpsc::unbounded();
+            let (outgoing_tx, outgoing_rx) = mpsc::unbounded();
+            let (activity_tx, _activity_rx) = mpsc::channel(8);
+            let mut async_cx = cx.to_async();
+            cx.executor().allow_parking();
+            let task = connection.start_proxy(
+                "workspace-7".to_string(),
+                reconnect,
+                incoming_tx,
+                outgoing_rx,
+                activity_tx,
+                delegate(),
+                &mut async_cx,
+            );
+            // Closing our end of the pipe ends the fake server, like Zed quitting.
+            drop(outgoing_tx);
+            let exit_code = task.await.unwrap();
+            assert_eq!(exit_code, 0);
+            assert_eq!(
+                std::fs::read_to_string(record.join("args")).unwrap(),
+                expected
+            );
+            assert_eq!(
+                std::fs::read_to_string(record.join("data_dir")).unwrap(),
+                data_dir.to_string_lossy()
+            );
+        }
+    }
+
+    #[gpui::test]
+    async fn test_a_missing_server_binary_fails_to_start_the_proxy(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().unwrap();
+        let connection =
+            connection(directory.path(), &directory.path().join("not_there"), cx).await;
+        let (incoming_tx, _incoming_rx) = mpsc::unbounded();
+        let (_outgoing_tx, outgoing_rx) = mpsc::unbounded();
+        let (activity_tx, _activity_rx) = mpsc::channel(8);
+        let mut async_cx = cx.to_async();
+        let error = connection
+            .start_proxy(
+                "workspace-1".to_string(),
+                false,
+                incoming_tx,
+                outgoing_rx,
+                activity_tx,
+                delegate(),
+                &mut async_cx,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("failed to start the project process"),
+            "{error}"
+        );
+    }
 
     #[test]
     fn test_the_same_folders_always_get_the_same_id() {
