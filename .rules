@@ -187,3 +187,57 @@ Rules emerge from validated patterns, not one-off observations. The workflow is:
 1. Agent notes a pattern during a session.
 2. Team validates the pattern in code review.
 3. A dedicated commit adds the rule with context on *why* it exists.
+
+## Engineering standards (this fork)
+
+The sections above are upstream Zed's agent instructions and stay as they are. This fork (`xetk/zed`) also follows [engineering-standards](https://gitea.xetk.co.uk/xetk/engineering-standards) **v1** for changes made in the fork.
+
+1. Work only from an issue. Branch `<type>/<issue>-<short-name>`; Conventional
+   Commits referencing the issue.
+2. Open pull requests; never push to `main`. A human reviews, approves and merges.
+3. Agents **propose** decisions (status `proposed`, or a decision request).
+   Only the named decider sets `accepted`, or tells you to.
+4. Never commit secrets. Reference them by name; values live in the secret store.
+5. Never bypass hooks (`--no-verify`) and never commit code you know is broken.
+6. No click-ops. If you need a manual change, stop and raise it in the issue.
+7. Every behaviour change comes with unit tests (100 % line and branch
+   coverage), Gherkin scenarios with tests, metrics/logs/alarms, and
+   docs/runbooks.
+8. Cross-reference issues in other repos with full URLs, not `#N`.
+9. Run the checks before you push: `pre-commit run --all-files`.
+10. **Communicate as in `COMMUNICATION.md`:** lead with the point, keep it
+    short and structured. For decisions: recommendation first, at most 3
+    lettered options, one question each, marked *blocking* or *can wait*, at
+    most 3 at once.
+
+Repo-specific notes:
+
+- **Precedence.** Upstream's rules above are not removed or overridden. Where
+  they conflict with the standards workflow, they are open decisions for the
+  owner (`docs/decisions/0003-agent-rules-conflict-with-standards-workflow.md`).
+  Until decided, stop and ask the owner rather than choosing one.
+- **What this repo is.** A fork of [zed-industries/zed](https://github.com/zed-industries/zed)
+  (GPL-3.0-or-later, Apache-2.0 where marked) with fork-only features such as
+  MCP thread control in `agent_ui` and `cli`. Homebrew builds from it
+  (`xetk/homebrew-zed`).
+- **Upstream code is not held to the standards**, only changes made in this
+  fork (`docs/decisions/0002-upstream-code-is-not-held-to-the-standards.md`).
+  Keep upstream files untouched where possible so syncing upstream stays easy.
+- **Decision records** live in `docs/decisions/` (new subfolder; no upstream
+  path collides). `docs/` itself is upstream's mdBook (`docs/src/`).
+- **Checks today:** no `.pre-commit-config.yaml`. CI is `.gitea/workflows/`:
+  `test-mac` (pull requests and `main`; `runs-on: macos`; builds and tests the
+  whole workspace, so it is slow), `features-check` (only when
+  `ci/update-server/**` or `assets/settings/default.json` change),
+  `build-mac`, `sync-upstream`, `mirror-to-github`. `.github/` is upstream's.
+  Do not build locally for a docs or config change.
+- **Agent files:** `AGENTS.md`, `CLAUDE.md` and `GEMINI.md` are all symlinks
+  to `.rules`; this section was appended there, so every agent sees it. Upstream's
+  own text above is unchanged.
+- **PR template:** `.gitea/pull_request_template.md` is upstream-derived (Zed
+  checklist, Release Notes) and is kept; the standards template was not added
+  (decision 0004).
+- **Secrets:** never commit them. Release credentials are Gitea Actions
+  secrets (`UPDATE_FEED_PRIVATE_KEY`, `ZED_PUBLISH_SSH_KEY`), referenced by name only.
+- **Deployed from here:** nightly and stable macOS builds via
+  `.gitea/workflows/build-mac.yml`, consumed by `xetk/homebrew-zed`.
