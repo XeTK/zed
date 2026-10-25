@@ -52,3 +52,9 @@ Zed is developed by **Zed Industries, Inc.**, a for-profit company.
 If you’d like to financially support the project, you can do so via GitHub Sponsors.
 Sponsorships go directly to Zed Industries and are used as general company revenue.
 There are no perks or entitlements associated with sponsorship.
+
+## Standards
+
+Follows [engineering-standards](https://gitea.xetk.co.uk/xetk/engineering-standards) **v1**, profiles: stack-defaults.
+
+Deviations are recorded in [`docs/decisions/`](docs/decisions/).
