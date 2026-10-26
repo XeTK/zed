@@ -212,10 +212,7 @@ The sections above are upstream Zed's agent instructions and stay as they are. T
 
 Repo-specific notes:
 
-- **Precedence.** Upstream's rules above are not removed or overridden. Where
-  they conflict with the standards workflow, they are open decisions for the
-  owner (`docs/decisions/0003-agent-rules-conflict-with-standards-workflow.md`).
-  Until decided, stop and ask the owner rather than choosing one.
+- **Precedence** ([decision 0003](docs/decisions/0003-agent-rules-conflict-with-standards-workflow.md), accepted). Upstream's rules above are not removed. For changes made only in this fork, the standards workflow wins where the two conflict: Conventional Commit PR titles with the issue link, a PR body that ends with the agent attribution line (no `Release Notes:` section), and a decision record for any deviation. Upstream's rules apply in full to code taken from upstream and to anything offered to the upstream project.
 - **What this repo is.** A fork of [zed-industries/zed](https://github.com/zed-industries/zed)
   (GPL-3.0-or-later, Apache-2.0 where marked) with fork-only features such as
   MCP thread control in `agent_ui` and `cli`. Homebrew builds from it
