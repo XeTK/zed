@@ -6,7 +6,7 @@
 |---|---|---|---|---|---|
 | 0001 | [Adopt engineering standards in this repo](0001-adopt-engineering-standards.md) | accepted | 2026-10-25 | standards, process |  |
 | 0002 | [Upstream code is not held to the standards](0002-upstream-code-is-not-held-to-the-standards.md) | proposed | 2026-10-25 | standards, fork |  |
-| 0003 | [Upstream agent rules conflict with the standards workflow](0003-agent-rules-conflict-with-standards-workflow.md) | proposed | 2026-10-25 | standards, agents, fork |  |
+| 0003 | [Upstream agent rules conflict with the standards workflow](0003-agent-rules-conflict-with-standards-workflow.md) | accepted | 2026-10-26 | standards, agents, fork |  |
 | 0004 | [Keep upstream's pull request template instead of the standards one](0004-keep-upstream-pull-request-template.md) | proposed | 2026-10-25 | standards, templates, fork |  |
 | 0005 | [No pre-commit, coverage gate, secrets scan or Gherkin yet](0005-no-pre-commit-hooks-or-standards-gates-yet.md) | proposed | 2026-10-25 | ci, testing, gap |  |
 | 0006 | [Dev shell, direnv and some CI tooling are outside the standards](0006-dev-shell-and-pinned-tooling-outside-standards.md) | proposed | 2026-10-25 | nix, tooling, gap |  |

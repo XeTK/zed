@@ -1,8 +1,8 @@
 ---
 id: "0003"
 title: "Upstream agent rules conflict with the standards workflow"
-status: proposed
-date: 2026-10-25
+status: accepted
+date: 2026-10-26
 deciders: [owner]
 consulted: []
 supersedes: []
@@ -27,13 +27,15 @@ Upstream ships agent instructions in `.rules` (`AGENTS.md`, `CLAUDE.md` and `GEM
 ## Options considered
 
 - A. Keep both; the owner decides per case (current state, slow).
-- B. Standards win in this fork's own changes; upstream rules apply to code taken from upstream. Recommended.
+- B. Standards win in this fork's own changes; upstream rules apply to code taken from upstream. **Chosen.**
 - C. Upstream rules win everywhere; drop the conflicting standards rules.
 
 ## Decision
 
-Pending. Recommendation: B. Target decision date: 2026-11-30. Until decided, agents ask the owner on a conflict.
+Option B, chosen by the owner on 2026-10-26. For changes made only in this fork the standards workflow wins where it conflicts with upstream's agent rules; upstream's rules apply in full to code taken from upstream and to anything offered to the upstream project.
 
 ## Consequences
 
-If B, add a precedence paragraph to the standards section and tell agents which title and body format to use for fork-only PRs.
+- The precedence paragraph in the fork section of `.rules` states this, and which PR title and body format to use for fork-only PRs.
+- Upstream's text in `.rules` is unchanged; only the fork section differs from upstream, so syncing upstream stays easy.
+- No removal date: this is a scope decision.
